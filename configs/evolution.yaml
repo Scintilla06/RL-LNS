@@ -1,0 +1,43 @@
+# Evolution Configuration (for heuristic generation)
+
+# General
+method: "eoh"  # ael, eoh, ls, sa
+problem: "milp_construct"
+
+# LLM API
+llm:
+  api_endpoint: "api.openai.com"  # Set your endpoint
+  api_key: "your-api-key"  # Set your key
+  model: "gpt-4o-mini"
+
+# Evolutionary computation
+ec:
+  pop_size: 4
+  n_pop: 20
+  m: 2  # Number of parents for crossover
+  operators:
+    - "e1"
+    - "e2"
+    - "m1"
+    - "m2"
+  operator_weights:
+    - 1
+    - 1
+    - 1
+    - 1
+
+# Selection and management
+selection: "prob_rank"  # prob_rank, equal, roulette_wheel, tournament
+management: "pop_greedy"  # pop_greedy, ls_greedy, ls_sa
+
+# Experiment
+exp:
+  debug_mode: false
+  output_path: "./outputs/evolution"
+  n_proc: 4
+
+# Evaluation
+eva:
+  timeout: 1750  # 5 * 350
+  prompt_timeout: 30
+  numba_decorator: false

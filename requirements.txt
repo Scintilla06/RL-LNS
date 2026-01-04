@@ -1,0 +1,41 @@
+# Core dependencies
+torch>=2.2.0
+torchvision
+torchaudio
+
+# PyTorch Geometric
+torch-geometric>=2.5.0
+torch-scatter
+torch-sparse
+
+# Transformers ecosystem
+transformers>=4.40.0
+accelerate>=0.27.0
+datasets
+tokenizers
+
+# Quantization & LoRA
+bitsandbytes>=0.43.0
+peft>=0.10.0
+
+# Scientific computing
+numpy
+scipy
+pandas
+
+# Utilities
+tqdm
+pyyaml
+joblib
+
+# Logging
+wandb
+
+# Optional: Gurobi (requires license)
+# gurobipy
+
+# Optional: Flash Attention (requires manual install)
+# flash-attn>=2.5.0
+
+# Optional: Unsloth (for faster training)
+# unsloth

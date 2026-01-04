@@ -1,0 +1,57 @@
+name: rl-lns
+channels:
+  - pytorch
+  - nvidia
+  - pyg
+  - conda-forge
+  - defaults
+
+dependencies:
+  # Python
+  - python=3.10
+  
+  # PyTorch with CUDA
+  - pytorch=2.2.*
+  - torchvision
+  - torchaudio
+  - pytorch-cuda=12.1
+  
+  # PyTorch Geometric
+  - pyg=2.5.*
+  - pytorch-scatter
+  - pytorch-sparse
+  
+  # Scientific computing
+  - numpy
+  - scipy
+  - pandas
+  
+  # Utilities
+  - tqdm
+  - pyyaml
+  - joblib
+  
+  # Pip dependencies
+  - pip
+  - pip:
+      # Transformers ecosystem
+      - transformers>=4.40.0
+      - accelerate>=0.27.0
+      - datasets
+      - tokenizers
+      
+      # Quantization & LoRA
+      - bitsandbytes>=0.43.0
+      - peft>=0.10.0
+      
+      # Flash Attention (optional, requires CUDA)
+      # - flash-attn>=2.5.0  # 需要手动安装，见下方说明
+      
+      # Logging
+      - wandb
+      
+      # Gurobi (需要单独安装和license)
+      # - gurobipy  # 通过 conda install -c gurobi gurobi 安装
+      
+      # Unsloth (optional, faster training)
+      # - unsloth  # 需要特殊安装，见下方说明

@@ -1,0 +1,78 @@
+# Training Configuration
+
+# SFT Training
+sft:
+  # Data
+  train_data: "data/processed/train"
+  val_data: "data/processed/val"
+  
+  # Batch
+  batch_size: 1
+  gradient_accumulation_steps: 16
+  effective_batch_size: 16
+  
+  # Optimizer
+  learning_rate: 2.0e-4
+  weight_decay: 0.01
+  warmup_ratio: 0.03
+  max_grad_norm: 1.0
+  
+  # Schedule
+  num_epochs: 3
+  
+  # Physics-informed loss weights
+  lambda_constraint: 0.1
+  lambda_integrality: 0.01
+  label_smoothing: 0.0
+  
+  # Logging
+  logging_steps: 10
+  eval_steps: 100
+  save_steps: 500
+  
+  # Mixed precision
+  fp16: true
+  
+  # Output
+  output_dir: "outputs/sft"
+
+# GRPO Training
+grpo:
+  # Sampling
+  group_size: 16
+  temperature: 1.0
+  
+  # Batch
+  batch_size: 1
+  
+  # Optimizer
+  learning_rate: 5.0e-5
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  
+  # Regularization
+  kl_coef: 0.01
+  entropy_coef: 0.01
+  
+  # Reward
+  baseline_type: "mean"  # mean, min, ref
+  infeasibility_penalty: 10.0
+  
+  # Schedule
+  num_epochs: 1
+  
+  # Logging
+  logging_steps: 10
+  save_steps: 500
+  
+  # Mixed precision
+  fp16: true
+  
+  # Output
+  output_dir: "outputs/grpo"
+
+# WandB
+wandb:
+  project: "rl-lns-milp"
+  entity: null
+  run_name: null

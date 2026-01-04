@@ -1,0 +1,60 @@
+# Model Configuration
+model:
+  # Base model - 可以是 HuggingFace 模型名或本地路径
+  # 在线: "Qwen/Qwen2.5-7B-Instruct" (自动下载到 ~/.cache/huggingface/)
+  # 本地: "./models/Qwen2.5-7B-Instruct" 或绝对路径
+  name: "Qwen/Qwen2.5-7B-Instruct"
+  hidden_size: 3584
+  
+  # Quantization
+  load_in_4bit: true
+  bnb_4bit_compute_dtype: "bfloat16"
+  bnb_4bit_quant_type: "nf4"
+  bnb_4bit_use_double_quant: true
+  
+  # LoRA
+  lora_r: 64
+  lora_alpha: 128
+  lora_dropout: 0.05
+  lora_target_modules:
+    - "q_proj"
+    - "k_proj"
+    - "v_proj"
+    - "o_proj"
+    - "gate_proj"
+    - "up_proj"
+    - "down_proj"
+  
+  # Attention
+  use_flash_attention: true
+  
+  # Position encoding
+  disable_rope: true  # Use position_ids=zeros instead
+
+# GNN Configuration
+gnn:
+  hidden_dim: 256
+  output_dim: 3584  # Match Qwen hidden_size
+  num_layers: 2
+  conv_type: "GINEConv"  # or "GATv2Conv"
+  dropout: 0.1
+  
+  # Feature encoding
+  fourier:
+    num_frequencies: 32
+    include_input: true
+  
+  rwpe:
+    walk_length: 16
+    hidden_dim: 64
+
+# Prediction heads
+heads:
+  hidden_dim: 1024
+  num_layers: 2
+  dropout: 0.1
+  activation: "gelu"
+  
+  # Multi-task outputs
+  enable_uncertainty: true
+  enable_dual: true

@@ -1,0 +1,34 @@
+# Data Configuration
+
+# Raw data
+raw:
+  train_json: "data/train_dataset_huge.json"
+  val_json: null  # Split from train if null
+  val_split_ratio: 0.1
+
+# Processed data
+processed:
+  output_dir: "data/processed"
+  train_dir: "data/processed/train"
+  val_dir: "data/processed/val"
+
+# Preprocessing
+preprocessing:
+  # LP relaxation
+  compute_lp_relaxation: true
+  gurobi_threads: 1
+  
+  # Graph construction
+  normalize_features: true
+  add_self_loops: false
+
+# Text mode
+text:
+  chunk_size: 8192
+  chunk_stride: 4096
+
+# DataLoader
+dataloader:
+  num_workers: 0
+  prefetch_factor: null
+  pin_memory: true

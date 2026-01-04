@@ -178,7 +178,8 @@ class NeuroSolver(nn.Module):
             
             print(f"Loaded {backbone} with unsloth (4-bit: {load_in_4bit})")
             
-        except ImportError:
+        except (ImportError, AttributeError) as e:
+            print(f"Warning: Failed to load unsloth ({e}). Fallback to standard transformers.")
             # Fallback to standard transformers
             from transformers import AutoModelForCausalLM, AutoTokenizer
             from peft import LoraConfig, get_peft_model

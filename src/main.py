@@ -115,34 +115,66 @@ def train_sft(args):
     
     import torch
     from src.model.neuro_solver import NeuroSolver
-    from src.datalib.dataset import MILPGraphDataset, create_dataloader
+    from src.datalib.dataset import MILPGraphDataset, MILPTextDataset, create_dataloader
     from src.training.sft_trainer import SFTTrainer
     
     # Device
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
     
+    # Get mode from args or config
+    mode = args.mode if hasattr(args, 'mode') and args.mode else 'gnn'
+    print(f"Training mode: {mode}")
+    
+    # Determine GNN layers based on mode
+    if mode == 'mlp':
+        # MLP mode: use 0 GNN layers (just projection)
+        gnn_num_layers = 0
+        actual_mode = 'gnn'  # Model still uses gnn forward path
+    elif mode == 'text':
+        gnn_num_layers = model_config['gnn']['num_layers']
+        actual_mode = 'text'
+    else:  # gnn
+        gnn_num_layers = model_config['gnn']['num_layers']
+        actual_mode = 'gnn'
+    
     # Initialize model
     print("Initializing model...")
     model = NeuroSolver(
         backbone=model_config['model']['name'],
+        mode=actual_mode,
         gnn_hidden_dim=model_config['gnn']['hidden_dim'],
-        gnn_num_layers=model_config['gnn']['num_layers'],
+        gnn_num_layers=gnn_num_layers,
         load_in_4bit=model_config['model']['load_in_4bit'],
         lora_r=model_config['model']['lora_r'],
         lora_alpha=model_config['model']['lora_alpha'],
         device=device,
     )
     
-    # Load datasets
+    # Load datasets based on mode
     sft_config = training_config['sft']
-    print(f"Loading training data from {sft_config['train_data']}...")
-    train_dataset = MILPGraphDataset(sft_config['train_data'])
     
-    val_dataset = None
-    if sft_config.get('val_data'):
-        print(f"Loading validation data from {sft_config['val_data']}...")
-        val_dataset = MILPGraphDataset(sft_config['val_data'])
+    if mode == 'text':
+        # Text mode: use text dataset with constraint info
+        train_data_path = sft_config.get('train_data_text', 'data/processed/train_text.pt')
+        val_data_path = sft_config.get('val_data_text', 'data/processed/val_text.pt')
+        
+        print(f"Loading text training data from {train_data_path}...")
+        train_dataset = MILPTextDataset(train_data_path, tokenizer=model.tokenizer)
+        
+        val_dataset = None
+        if val_data_path:
+            print(f"Loading text validation data from {val_data_path}...")
+            val_dataset = MILPTextDataset(val_data_path, tokenizer=model.tokenizer)
+    else:
+        # GNN/MLP mode: use graph dataset
+        print(f"Loading graph training data from {sft_config['train_data']}...")
+        train_dataset = MILPGraphDataset(sft_config['train_data'])
+        
+        val_dataset = None
+        if sft_config.get('val_data'):
+            print(f"Loading graph validation data from {sft_config['val_data']}...")
+            val_dataset = MILPGraphDataset(sft_config['val_data'])
     
     print(f"Train samples: {len(train_dataset)}")
     if val_dataset:
@@ -346,6 +378,8 @@ def main():
                            help='Training configuration file')
     sft_parser.add_argument('--model-config', type=str, default=None,
                            help='Model configuration file')
+    sft_parser.add_argument('--mode', type=str, default='gnn', choices=['gnn', 'mlp', 'text'],
+                           help='Training mode: gnn (default), mlp (no GNN layers), text (text input)')
     
     # Train GRPO command
     grpo_parser = subparsers.add_parser('train-grpo', help='Train with GRPO')

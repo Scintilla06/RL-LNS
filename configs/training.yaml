@@ -2,9 +2,13 @@
 
 # SFT Training
 sft:
-  # Data
+  # Data - Graph format (for gnn/mlp modes)
   train_data: "data/processed/train.pt"
   val_data: "data/processed/val.pt"
+  
+  # Data - Text format (for text mode, with preprocessed constraints)
+  train_data_text: "data/processed/train_text.pt"
+  val_data_text: "data/processed/val_text.pt"
   
   # Batch
   batch_size: 1

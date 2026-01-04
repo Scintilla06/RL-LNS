@@ -75,6 +75,78 @@ class MILPGraphDataset(Dataset):
 
 class MILPTextDataset(Dataset):
     """
+    Dataset for MILP instances in text format with preprocessed constraint info.
+    
+    Loads from preprocessed .pt files that contain:
+    - text: MILP problem text
+    - target: optimal solution
+    - A, b, sense: constraint matrix information
+    - var_types: variable types
+    
+    This ensures text mode can use the same PhysicsInformedLoss as GNN mode.
+    """
+    
+    def __init__(
+        self,
+        data_path: str,
+        tokenizer: Optional[Any] = None,
+        max_length: int = 65536,
+        chunk_size: int = 8192,
+        stride: int = 4096,
+    ):
+        """
+        Args:
+            data_path: Path to preprocessed .pt file (train_text.pt or val_text.pt).
+            tokenizer: HuggingFace tokenizer (optional, for on-the-fly tokenization).
+            max_length: Maximum total sequence length.
+            chunk_size: Size of each chunk for long sequences.
+            stride: Stride between chunks (overlap = chunk_size - stride).
+        """
+        self.data_path = Path(data_path)
+        self.tokenizer = tokenizer
+        self.max_length = max_length
+        self.chunk_size = chunk_size
+        self.stride = stride
+        
+        # Load preprocessed data
+        self.data_list = torch.load(self.data_path)
+    
+    def __len__(self) -> int:
+        return len(self.data_list)
+    
+    def __getitem__(self, idx: int) -> Dict[str, Any]:
+        sample = self.data_list[idx]
+        
+        result = {
+            'text': sample.text,
+            'n_vars': sample.n_vars,
+            'n_constrs': sample.n_constrs,
+            'target': torch.tensor(sample.target, dtype=torch.float32),
+            'A': torch.tensor(sample.A, dtype=torch.float32),
+            'b': torch.tensor(sample.b, dtype=torch.float32),
+            'sense': torch.tensor(sample.sense, dtype=torch.long),
+            'var_types': torch.tensor(sample.var_types, dtype=torch.long),
+            'mode': 'text',
+        }
+        
+        if sample.lp_relaxation is not None:
+            result['lp_relaxation'] = torch.tensor(sample.lp_relaxation, dtype=torch.float32)
+        
+        # Tokenize if tokenizer provided
+        if self.tokenizer is not None:
+            encoding = self.tokenizer(
+                sample.text,
+                truncation=False,
+                return_tensors='pt',
+            )
+            result['input_ids'] = encoding['input_ids'].squeeze(0)
+            result['attention_mask'] = encoding['attention_mask'].squeeze(0)
+        
+        return result
+
+
+class MILPTextDatasetLegacy(Dataset):
+    """
     Dataset for MILP instances in text format (for baseline comparison).
     
     Handles long sequences by storing variable position mappings.

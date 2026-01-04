@@ -209,47 +209,86 @@ class SFTTrainer:
         Handles both graph and text modes.
         """
         if HAS_PYG and isinstance(batch, HeteroData):
-            # Graph mode
-            return {
+            # Graph mode - extract constraint info from dense matrices if available
+            result = {
                 'data': batch.to(self.device),
                 'target': batch['var'].y.to(self.device) if hasattr(batch['var'], 'y') else None,
                 'mode': 'gnn',
             }
+            # Use dense constraint matrices if available (new format)
+            if hasattr(batch, 'A') and batch.A is not None:
+                result['A'] = batch.A.to(self.device)
+                result['b'] = batch.b.to(self.device)
+                result['sense'] = batch.sense.to(self.device)
+            return result
         elif isinstance(batch, dict):
-            # Could be text mode or processed graph
-            return batch
+            # Text mode - constraint info already in dict
+            result = {}
+            for k, v in batch.items():
+                if isinstance(v, torch.Tensor):
+                    result[k] = v.to(self.device)
+                else:
+                    result[k] = v
+            return result
         elif isinstance(batch, list):
             # List of samples - process first one
             return self._prepare_batch(batch[0])
         else:
             raise ValueError(f"Unknown batch type: {type(batch)}")
     
-    def _extract_constraints(self, data: "HeteroData") -> Dict[str, Any]:
-        """Extract constraint information from graph data."""
-        # Build constraint matrix from edges
-        edge_index = data['var', 'participates', 'constr'].edge_index
-        edge_attr = data['var', 'participates', 'constr'].edge_attr
+    def _extract_constraints(self, prepared: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Extract constraint information from prepared batch.
         
-        constr_matrix = []
-        for i in range(edge_index.size(1)):
-            var_idx = edge_index[0, i].item()
-            constr_idx = edge_index[1, i].item()
-            coeff = edge_attr[i, 0].item()
-            constr_matrix.append((constr_idx, var_idx, coeff))
+        Supports both:
+        - Dense format (A, b, sense) from new preprocessed data
+        - Sparse format (from graph edges) for backward compatibility
+        """
+        # Prefer dense format if available
+        if 'A' in prepared and prepared['A'] is not None:
+            return {
+                'A': prepared['A'],
+                'b': prepared['b'],
+                'sense': prepared['sense'],
+            }
         
-        # Get constraint RHS and sense from constraint node features
-        # Features: [rhs, sense_onehot(3)]
-        constr_features = data['constr'].x
-        constr_rhs = constr_features[:, 0]
-        constr_sense = constr_features[:, 1:4].argmax(dim=1) + 1  # 1, 2, or 3
+        # Fall back to extracting from graph structure
+        if 'data' in prepared and prepared.get('mode') == 'gnn':
+            data = prepared['data']
+            
+            # Check if dense matrices are stored in graph
+            if hasattr(data, 'A') and data.A is not None:
+                return {
+                    'A': data.A,
+                    'b': data.b,
+                    'sense': data.sense,
+                }
+            
+            # Legacy: Build from edges
+            edge_index = data['var', 'participates', 'constr'].edge_index
+            edge_attr = data['var', 'participates', 'constr'].edge_attr
+            
+            constr_matrix = []
+            for i in range(edge_index.size(1)):
+                var_idx = edge_index[0, i].item()
+                constr_idx = edge_index[1, i].item()
+                coeff = edge_attr[i, 0].item()
+                constr_matrix.append((constr_idx, var_idx, coeff))
+            
+            constr_features = data['constr'].x
+            constr_rhs = constr_features[:, 0]
+            constr_sense = constr_features[:, 1:4].argmax(dim=1) + 1
+            
+            return {
+                'constr_matrix': constr_matrix,
+                'constr_rhs': constr_rhs,
+                'constr_sense': constr_sense,
+                'n_vars': data['var'].x.size(0),
+                'n_constrs': data['constr'].x.size(0),
+            }
         
-        return {
-            'constr_matrix': constr_matrix,
-            'constr_rhs': constr_rhs,
-            'constr_sense': constr_sense,
-            'n_vars': data['var'].x.size(0),
-            'n_constrs': data['constr'].x.size(0),
-        }
+        # No constraint info available
+        return {}
     
     def train_step(self, batch: Any) -> Dict[str, float]:
         """
@@ -262,24 +301,28 @@ class SFTTrainer:
             Dict of loss values.
         """
         prepared = self._prepare_batch(batch)
+        mode = prepared.get('mode', 'gnn')
         
-        # Forward pass
+        # Forward pass based on mode
         if self.fp16:
             with torch.cuda.amp.autocast():
-                output = self.model(data=prepared.get('data'), mode=prepared.get('mode', 'gnn'))
+                if mode == 'text':
+                    output = self.model(text=prepared.get('text'), mode='text')
+                else:
+                    output = self.model(data=prepared.get('data'), mode=mode)
         else:
-            output = self.model(data=prepared.get('data'), mode=prepared.get('mode', 'gnn'))
+            if mode == 'text':
+                output = self.model(text=prepared.get('text'), mode='text')
+            else:
+                output = self.model(data=prepared.get('data'), mode=mode)
         
         # Get target
         target = prepared.get('target')
         if target is None:
             raise ValueError("No target labels in batch")
         
-        # Extract constraints for physics loss
-        if 'data' in prepared and prepared['mode'] == 'gnn':
-            constr_info = self._extract_constraints(prepared['data'])
-        else:
-            constr_info = {}
+        # Extract constraints for physics loss (unified for all modes)
+        constr_info = self._extract_constraints(prepared)
         
         # Compute loss
         if self.fp16:

@@ -420,6 +420,19 @@ class GraphBuilder:
         data.n_constrs = instance.n_constrs
         data.obj_sense = instance.obj_sense
         
+        # Store dense constraint matrix for loss computation
+        # Build dense matrix A from sparse representation
+        A = np.zeros((instance.n_constrs, instance.n_vars))
+        for constr_idx, var_idx, coeff in instance.constr_matrix:
+            A[constr_idx, var_idx] = coeff
+        
+        data.A = torch.tensor(A, dtype=torch.float32)  # (n_constrs, n_vars)
+        data.b = torch.tensor(instance.constr_rhs, dtype=torch.float32)  # (n_constrs,)
+        data.sense = torch.tensor(instance.constr_sense, dtype=torch.long)  # (n_constrs,)
+        
+        # Store variable types for future general MILP support
+        data.var_types = torch.tensor(instance.var_types, dtype=torch.long)  # (n_vars,)
+        
         return data
 
 
@@ -485,11 +498,77 @@ class TextFormatter:
         return text, var_positions
 
 
+@dataclass
+class TextDataSample:
+    """Preprocessed text data sample with constraint information."""
+    text: str                            # MILP in text format
+    n_vars: int                          # Number of variables
+    n_constrs: int                       # Number of constraints
+    target: np.ndarray                   # Optimal solution (n_vars,)
+    A: np.ndarray                        # Constraint matrix (n_constrs, n_vars)
+    b: np.ndarray                        # RHS (n_constrs,)
+    sense: np.ndarray                    # Constraint sense (n_constrs,)
+    var_types: np.ndarray                # Variable types (n_vars,)
+    lp_relaxation: Optional[np.ndarray] = None  # LP relaxation (n_vars,)
+    instance_id: Optional[int] = None
+
+
 class MILPPreprocessor:
     """Main preprocessor class for MILP data."""
     
-    def __init__(self, config: Optional[Any] = None):
+    def __init__(self, config: Optional[Any] = None, compute_lp_relaxation: bool = True):
         self.config = config
+        self.compute_lp_relaxation = compute_lp_relaxation
+    
+    def _process_instance(self, sample: Dict, idx: int) -> Tuple[MILPInstance, "HeteroData", TextDataSample]:
+        """
+        Process a single sample into all formats.
+        
+        Returns:
+            Tuple of (MILPInstance, HeteroData graph, TextDataSample)
+        """
+        # Parse LP format
+        instance = LPFormatParser.parse(sample['input'])
+        instance.instance_id = str(idx)
+        
+        # Parse optimal solution
+        if 'output' in sample:
+            instance.optimal_solution = SolutionParser.parse(
+                sample['output'], instance.n_vars
+            )
+        
+        # Compute LP relaxation
+        if self.compute_lp_relaxation:
+            instance.lp_relaxation = LPRelaxationSolver.solve(instance)
+        
+        # Build graph data
+        graph = GraphBuilder.build(instance)
+        graph.instance_id = idx
+        
+        # Build text data with constraint information
+        text_data = self._build_text_data(instance, sample['input'], idx)
+        
+        return instance, graph, text_data
+    
+    def _build_text_data(self, instance: MILPInstance, raw_text: str, idx: int) -> TextDataSample:
+        """Build text data sample with all constraint information."""
+        # Build dense constraint matrix
+        A = np.zeros((instance.n_constrs, instance.n_vars))
+        for constr_idx, var_idx, coeff in instance.constr_matrix:
+            A[constr_idx, var_idx] = coeff
+        
+        return TextDataSample(
+            text=raw_text,
+            n_vars=instance.n_vars,
+            n_constrs=instance.n_constrs,
+            target=instance.optimal_solution if instance.optimal_solution is not None else np.zeros(instance.n_vars),
+            A=A,
+            b=instance.constr_rhs,
+            sense=instance.constr_sense,
+            var_types=instance.var_types,
+            lp_relaxation=instance.lp_relaxation,
+            instance_id=idx,
+        )
     
     def process_json_dataset(
         self,
@@ -499,7 +578,7 @@ class MILPPreprocessor:
         max_samples: Optional[int] = None,
     ) -> None:
         """
-        Process JSON dataset to graph format.
+        Process JSON dataset to both graph and text formats.
         
         Args:
             json_path: Path to JSON file.
@@ -507,6 +586,7 @@ class MILPPreprocessor:
             compute_lp_relaxation: Whether to compute LP relaxation.
             max_samples: Maximum number of samples to process.
         """
+        self.compute_lp_relaxation = compute_lp_relaxation
         output_path = Path(output_dir)
         output_path.mkdir(parents=True, exist_ok=True)
         
@@ -518,48 +598,40 @@ class MILPPreprocessor:
             data = data[:max_samples]
         
         print(f"Processing {len(data)} samples...")
-        processed = []
+        graph_data = []
+        text_data = []
         
         for idx, sample in enumerate(tqdm(data)):
             try:
-                # Parse LP format
-                instance = LPFormatParser.parse(sample['input'])
-                instance.instance_id = str(idx)
-                
-                # Parse optimal solution
-                if 'output' in sample:
-                    instance.optimal_solution = SolutionParser.parse(
-                        sample['output'], instance.n_vars
-                    )
-                
-                # Compute LP relaxation
-                if compute_lp_relaxation:
-                    instance.lp_relaxation = LPRelaxationSolver.solve(instance)
-                
-                # Build graph
-                graph = GraphBuilder.build(instance)
-                graph.instance_id = idx
-                
-                processed.append(graph)
+                instance, graph, text_sample = self._process_instance(sample, idx)
+                graph_data.append(graph)
+                text_data.append(text_sample)
                 
             except Exception as e:
                 print(f"Error processing sample {idx}: {e}")
                 continue
         
         # Save processed data
-        print(f"Saving {len(processed)} processed graphs...")
+        print(f"Saving {len(graph_data)} processed samples...")
         
-        # Split train/val
-        val_size = int(len(processed) * 0.1)
-        train_data = processed[val_size:]
-        val_data = processed[:val_size]
+        # Split train/val (10% validation)
+        val_size = int(len(graph_data) * 0.1)
         
-        torch.save(train_data, output_path / "train.pt")
-        torch.save(val_data, output_path / "val.pt")
+        # Graph data
+        train_graph = graph_data[val_size:]
+        val_graph = graph_data[:val_size]
+        torch.save(train_graph, output_path / "train.pt")
+        torch.save(val_graph, output_path / "val.pt")
+        
+        # Text data (with constraints)
+        train_text = text_data[val_size:]
+        val_text = text_data[:val_size]
+        torch.save(train_text, output_path / "train_text.pt")
+        torch.save(val_text, output_path / "val_text.pt")
         
         print(f"Saved to {output_path}")
-        print(f"  Train: {len(train_data)} samples")
-        print(f"  Val: {len(val_data)} samples")
+        print(f"  Graph - Train: {len(train_graph)}, Val: {len(val_graph)}")
+        print(f"  Text  - Train: {len(train_text)}, Val: {len(val_text)}")
     
     def process_single(self, lp_string: str, solution_string: Optional[str] = None) -> "HeteroData":
         """

@@ -45,7 +45,7 @@ echo "Start Time: $(date)"
 echo "============================================================"
 
 # Run training (use main.py subcommand)
-python src/main.py train-sft --config configs/training.yaml
+python src/main.py train-sft --config configs/training.yaml --mode mlp
 
 echo "============================================================"
 echo "End Time: $(date)"

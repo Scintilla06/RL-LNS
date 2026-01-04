@@ -263,7 +263,7 @@ class NeuroSolver(nn.Module):
         )
         
         # Get last hidden state
-        hidden_states = outputs.last_hidden_state  # (1, seq_len, hidden_size)
+        hidden_states = outputs.hidden_states[-1]  # (1, seq_len, hidden_size)
         
         # Extract variable hidden states (first n_vars positions)
         var_hidden = hidden_states[:, :n_vars, :]  # (1, n_vars, hidden_size)

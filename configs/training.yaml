@@ -3,8 +3,8 @@
 # SFT Training
 sft:
   # Data
-  train_data: "data/processed/train"
-  val_data: "data/processed/val"
+  train_data: "data/processed/train.pt"
+  val_data: "data/processed/val.pt"
   
   # Batch
   batch_size: 1

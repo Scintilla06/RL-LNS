@@ -14,7 +14,7 @@ import concurrent.futures
 from typing import Optional, List, Dict, Any, Tuple
 from joblib import Parallel, delayed
 
-from .api import Evolution, EvolutionPrompt
+from ..llm.api import Evolution, EvolutionPrompt
 from ..utils.code_utils import add_numba_decorator
 
 

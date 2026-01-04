@@ -254,8 +254,8 @@ def evolve(args):
     from src.problems.milp import MILPProblem
     
     # Import selection and management methods
-    from selection import prob_rank, equal, roulette_wheel, tournament
-    from management import pop_greedy, ls_greedy, ls_sa
+    from src.evolution.selection import prob_rank, equal, roulette_wheel, tournament
+    from src.evolution.management import pop_greedy, ls_greedy, ls_sa
     
     # Create parameters
     paras = Paras()

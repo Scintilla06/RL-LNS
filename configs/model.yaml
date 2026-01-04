@@ -3,7 +3,7 @@ model:
   # Base model - 可以是 HuggingFace 模型名或本地路径
   # 在线: "Qwen/Qwen2.5-7B-Instruct" (自动下载到 ~/.cache/huggingface/)
   # 本地: "./models/Qwen2.5-7B-Instruct" 或绝对路径
-  name: "Qwen/Qwen2.5-7B-Instruct"
+  name: "./models/Qwen2.5-7B-Instruct"
   hidden_size: 3584
   
   # Quantization

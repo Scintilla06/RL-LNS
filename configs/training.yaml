@@ -76,3 +76,4 @@ wandb:
   project: "rl-lns-milp"
   entity: null
   run_name: null
+  mode: "offline"

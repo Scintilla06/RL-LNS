@@ -68,6 +68,7 @@ class SFTTrainer:
         fp16: bool = True,
         wandb_project: Optional[str] = None,
         wandb_run_name: Optional[str] = None,
+        wandb_mode: str = "online",
         device: Optional[torch.device] = None,
     ):
         """
@@ -91,6 +92,7 @@ class SFTTrainer:
             fp16: Whether to use mixed precision.
             wandb_project: WandB project name.
             wandb_run_name: WandB run name.
+            wandb_mode: WandB mode (online/offline).
             device: Device for training.
         """
         self.model = model
@@ -138,6 +140,7 @@ class SFTTrainer:
             wandb.init(
                 project=wandb_project,
                 name=wandb_run_name,
+                mode=wandb_mode,
                 config={
                     'batch_size': batch_size,
                     'effective_batch_size': self.effective_batch_size,

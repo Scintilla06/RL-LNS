@@ -169,6 +169,7 @@ def train_sft(args):
         fp16=sft_config['fp16'],
         wandb_project=training_config.get('wandb', {}).get('project'),
         wandb_run_name=training_config.get('wandb', {}).get('run_name'),
+        wandb_mode=training_config.get('wandb', {}).get('mode', 'online'),
         device=device,
     )
     
@@ -230,6 +231,7 @@ def train_grpo(args):
         fp16=grpo_config['fp16'],
         wandb_project=training_config.get('wandb', {}).get('project'),
         wandb_run_name=training_config.get('wandb', {}).get('run_name'),
+        wandb_mode=training_config.get('wandb', {}).get('mode', 'online'),
         device=device,
     )
     

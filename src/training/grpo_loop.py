@@ -255,6 +255,7 @@ class GRPOTrainer:
         fp16: bool = True,
         wandb_project: Optional[str] = None,
         wandb_run_name: Optional[str] = None,
+        wandb_mode: str = "online",
         device: Optional[torch.device] = None,
     ):
         """
@@ -335,6 +336,7 @@ class GRPOTrainer:
             wandb.init(
                 project=wandb_project,
                 name=wandb_run_name,
+                mode=wandb_mode,
                 config={
                     'group_size': group_size,
                     'learning_rate': learning_rate,

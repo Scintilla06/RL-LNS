@@ -69,6 +69,7 @@ class SFTTrainer:
         wandb_project: Optional[str] = None,
         wandb_run_name: Optional[str] = None,
         wandb_mode: str = "online",
+        max_samples_per_epoch: Optional[int] = None,
         device: Optional[torch.device] = None,
     ):
         """
@@ -93,6 +94,7 @@ class SFTTrainer:
             wandb_project: WandB project name.
             wandb_run_name: WandB run name.
             wandb_mode: WandB mode (online/offline).
+            max_samples_per_epoch: Maximum number of samples to use per epoch.
             device: Device for training.
         """
         self.model = model
@@ -108,6 +110,7 @@ class SFTTrainer:
         self.num_epochs = num_epochs
         self.warmup_ratio = warmup_ratio
         self.max_grad_norm = max_grad_norm
+        self.max_samples_per_epoch = max_samples_per_epoch
         
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -338,6 +341,10 @@ class SFTTrainer:
             progress_bar = tqdm(train_loader, desc=f"Epoch {epoch + 1}")
             
             for step, batch in enumerate(progress_bar):
+                # Check max samples
+                if self.max_samples_per_epoch is not None and step * self.batch_size >= self.max_samples_per_epoch:
+                    break
+                
                 # Training step
                 losses = self.train_step(batch)
                 
@@ -432,7 +439,12 @@ class SFTTrainer:
             for batch in tqdm(val_loader, desc="Evaluating"):
                 prepared = self._prepare_batch(batch)
                 
-                output = self.model(data=prepared.get('data'), mode=prepared.get('mode', 'gnn'))
+                if self.fp16:
+                    with torch.cuda.amp.autocast():
+                        output = self.model(data=prepared.get('data'), mode=prepared.get('mode', 'gnn'))
+                else:
+                    output = self.model(data=prepared.get('data'), mode=prepared.get('mode', 'gnn'))
+                
                 target = prepared.get('target')
                 
                 if target is None:

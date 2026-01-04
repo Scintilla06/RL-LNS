@@ -10,6 +10,7 @@ sft:
   batch_size: 1
   gradient_accumulation_steps: 16
   effective_batch_size: 16
+  max_samples_per_epoch: 5000  # Limit samples per epoch
   
   # Optimizer
   learning_rate: 2.0e-4

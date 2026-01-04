@@ -170,6 +170,7 @@ def train_sft(args):
         wandb_project=training_config.get('wandb', {}).get('project'),
         wandb_run_name=training_config.get('wandb', {}).get('run_name'),
         wandb_mode=training_config.get('wandb', {}).get('mode', 'online'),
+        max_samples_per_epoch=sft_config.get('max_samples_per_epoch'),
         device=device,
     )
     

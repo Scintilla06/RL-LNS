@@ -36,6 +36,3 @@ wandb
 
 # Optional: Flash Attention (requires manual install)
 # flash-attn>=2.5.0
-
-# Optional: Unsloth (for faster training)
-# unsloth

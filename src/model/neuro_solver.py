@@ -149,81 +149,49 @@ class NeuroSolver(nn.Module):
         """
         Load Qwen backbone with optional LoRA.
         """
-        try:
-            # Try using unsloth for optimized loading
-            from unsloth import FastLanguageModel
-            
-            model, tokenizer = FastLanguageModel.from_pretrained(
-                model_name=backbone,
-                max_seq_length=32768,
-                dtype=None,  # Auto-detect
-                load_in_4bit=load_in_4bit,
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+        from peft import LoraConfig, get_peft_model
+        
+        tokenizer = AutoTokenizer.from_pretrained(backbone, trust_remote_code=True)
+        
+        model_kwargs = {
+            "trust_remote_code": True,
+            "device_map": "auto",
+        }
+        
+        if load_in_4bit:
+            from transformers import BitsAndBytesConfig
+            model_kwargs["quantization_config"] = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_compute_dtype=torch.float16,
+                bnb_4bit_use_double_quant=True,
+                bnb_4bit_quant_type="nf4",
             )
-            
-            # Apply LoRA
-            target_modules = lora_target_modules or [
-                "q_proj", "k_proj", "v_proj", "o_proj",
-                "gate_proj", "up_proj", "down_proj",
-            ]
-            
-            model = FastLanguageModel.get_peft_model(
-                model,
-                r=lora_r,
-                target_modules=target_modules,
-                lora_alpha=lora_alpha,
-                lora_dropout=0.05,
-                bias="none",
-                use_gradient_checkpointing="unsloth",
-            )
-            
-            print(f"Loaded {backbone} with unsloth (4-bit: {load_in_4bit})")
-            
-        except (ImportError, AttributeError) as e:
-            print(f"Warning: Failed to load unsloth ({e}). Fallback to standard transformers.")
-            # Fallback to standard transformers
-            from transformers import AutoModelForCausalLM, AutoTokenizer
-            from peft import LoraConfig, get_peft_model
-            
-            tokenizer = AutoTokenizer.from_pretrained(backbone, trust_remote_code=True)
-            
-            model_kwargs = {
-                "trust_remote_code": True,
-                "device_map": "auto",
-            }
-            
-            if load_in_4bit:
-                from transformers import BitsAndBytesConfig
-                model_kwargs["quantization_config"] = BitsAndBytesConfig(
-                    load_in_4bit=True,
-                    bnb_4bit_compute_dtype=torch.float16,
-                    bnb_4bit_use_double_quant=True,
-                    bnb_4bit_quant_type="nf4",
-                )
-            
-            if use_flash_attention:
-                model_kwargs["attn_implementation"] = "flash_attention_2"
-            
-            model = AutoModelForCausalLM.from_pretrained(backbone, **model_kwargs)
-            
-            # Apply LoRA
-            target_modules = lora_target_modules or [
-                "q_proj", "k_proj", "v_proj", "o_proj",
-                "gate_proj", "up_proj", "down_proj",
-            ]
-            
-            lora_config = LoraConfig(
-                r=lora_r,
-                lora_alpha=lora_alpha,
-                target_modules=target_modules,
-                lora_dropout=0.05,
-                bias="none",
-                task_type="CAUSAL_LM",
-            )
-            
-            model = get_peft_model(model, lora_config)
-            model.gradient_checkpointing_enable()
-            
-            print(f"Loaded {backbone} with transformers (4-bit: {load_in_4bit})")
+        
+        if use_flash_attention:
+            model_kwargs["attn_implementation"] = "flash_attention_2"
+        
+        model = AutoModelForCausalLM.from_pretrained(backbone, **model_kwargs)
+        
+        # Apply LoRA
+        target_modules = lora_target_modules or [
+            "q_proj", "k_proj", "v_proj", "o_proj",
+            "gate_proj", "up_proj", "down_proj",
+        ]
+        
+        lora_config = LoraConfig(
+            r=lora_r,
+            lora_alpha=lora_alpha,
+            target_modules=target_modules,
+            lora_dropout=0.05,
+            bias="none",
+            task_type="CAUSAL_LM",
+        )
+        
+        model = get_peft_model(model, lora_config)
+        model.gradient_checkpointing_enable()
+        
+        print(f"Loaded {backbone} with transformers (4-bit: {load_in_4bit})")
         
         return model, tokenizer
     

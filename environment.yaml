@@ -52,6 +52,3 @@ dependencies:
       
       # Gurobi (需要单独安装和license)
       # - gurobipy  # 通过 conda install -c gurobi gurobi 安装
-      
-      # Unsloth (optional, faster training)
-      # - unsloth  # 需要特殊安装，见下方说明

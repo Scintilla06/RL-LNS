@@ -51,7 +51,8 @@ class TaskLoss(nn.Module):
             target = target * (1 - self.label_smoothing) + 0.5 * self.label_smoothing
         
         # Compute BCE
-        loss = F.binary_cross_entropy(pred, target, weight=weight, reduction='none')
+        # loss = F.binary_cross_entropy(pred, target, weight=weight, reduction='none')
+        loss = F.binary_cross_entropy_with_logits(pred, target, weight=weight, reduction='none')
         
         return loss.mean()
 
@@ -100,8 +101,12 @@ class ConstraintLoss(nn.Module):
         
         # Compute Ax for each constraint
         ax = torch.zeros(n_constrs, device=device)
+        
+        # Use sigmoid to get probabilities for constraint calculation
+        probs = torch.sigmoid(pred)
+        
         for constr_idx, var_idx, coeff in constr_matrix:
-            ax[constr_idx] += coeff * pred[var_idx]
+            ax[constr_idx] += coeff * probs[var_idx]
         
         # Compute violations based on constraint sense
         violations = torch.zeros(n_constrs, device=device)
@@ -147,9 +152,12 @@ class ConstraintLoss(nn.Module):
         """
         if pred.dim() == 1:
             pred = pred.unsqueeze(0)
+            
+        # Use sigmoid to get probabilities for constraint calculation
+        probs = torch.sigmoid(pred)
         
         # Compute Ax: (batch, n_constrs)
-        ax = torch.matmul(pred, A.T)
+        ax = torch.matmul(probs, A.T)
         
         # Expand b for batch: (1, n_constrs)
         b = b.unsqueeze(0)
@@ -202,8 +210,11 @@ class IntegralityLoss(nn.Module):
         Returns:
             Integrality loss.
         """
+        # Use sigmoid to get probabilities
+        probs = torch.sigmoid(pred)
+        
         # Periodic cosine loss
-        loss = 1 - torch.cos(2 * torch.pi * pred)
+        loss = 1 - torch.cos(2 * torch.pi * probs)
         
         if self.reduction == "mean":
             return loss.mean()

@@ -73,9 +73,9 @@ class PredictionHead(nn.Module):
         logits = logits.squeeze(-1)  # (...,)
         
         # Sigmoid for probability
-        probs = torch.sigmoid(logits)
+        # probs = torch.sigmoid(logits)
         
-        return probs
+        return logits
 
 
 class UncertaintyHead(nn.Module):

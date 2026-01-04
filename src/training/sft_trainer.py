@@ -314,8 +314,16 @@ class SFTTrainer:
         # Create data loader
         train_loader = self._create_dataloader(self.train_dataset, shuffle=True)
         
+        # Determine batches per epoch
+        total_batches = len(train_loader)
+        if self.max_samples_per_epoch is not None:
+            max_batches = (self.max_samples_per_epoch + self.batch_size - 1) // self.batch_size
+            batches_per_epoch = min(total_batches, max_batches)
+        else:
+            batches_per_epoch = total_batches
+        
         # Calculate total steps
-        num_training_steps = len(train_loader) * self.num_epochs // self.gradient_accumulation_steps
+        num_training_steps = batches_per_epoch * self.num_epochs // self.gradient_accumulation_steps
         
         # Create scheduler
         self._create_scheduler(num_training_steps)
@@ -332,19 +340,22 @@ class SFTTrainer:
         self.model.train()
         
         # Training loop
+        import itertools
         for epoch in range(self.num_epochs):
             print(f"\nEpoch {epoch + 1}/{self.num_epochs}")
             
             epoch_losses = {'total': 0, 'task': 0, 'constraint': 0, 'integrality': 0}
             num_batches = 0
             
-            progress_bar = tqdm(train_loader, desc=f"Epoch {epoch + 1}")
+            # Use islice to limit iterator if needed
+            if self.max_samples_per_epoch is not None:
+                epoch_iterator = itertools.islice(train_loader, batches_per_epoch)
+            else:
+                epoch_iterator = train_loader
+            
+            progress_bar = tqdm(epoch_iterator, total=batches_per_epoch, desc=f"Epoch {epoch + 1}")
             
             for step, batch in enumerate(progress_bar):
-                # Check max samples
-                if self.max_samples_per_epoch is not None and step * self.batch_size >= self.max_samples_per_epoch:
-                    break
-                
                 # Training step
                 losses = self.train_step(batch)
                 

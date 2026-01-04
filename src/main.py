@@ -125,12 +125,9 @@ def train_sft(args):
     # Initialize model
     print("Initializing model...")
     model = NeuroSolver(
-        model_name=model_config['model']['name'],
+        backbone=model_config['model']['name'],
         gnn_hidden_dim=model_config['gnn']['hidden_dim'],
-        gnn_output_dim=model_config['gnn']['output_dim'],
         gnn_num_layers=model_config['gnn']['num_layers'],
-        head_hidden_dim=model_config['heads']['hidden_dim'],
-        head_num_layers=model_config['heads']['num_layers'],
         load_in_4bit=model_config['model']['load_in_4bit'],
         lora_r=model_config['model']['lora_r'],
         lora_alpha=model_config['model']['lora_alpha'],

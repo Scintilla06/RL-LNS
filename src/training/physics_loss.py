@@ -73,6 +73,15 @@ class TaskLoss(nn.Module):
         total_loss = torch.tensor(0.0, device=pred.device)
         count = 0
         
+        # Ensure shapes match for masking
+        # If pred/target are (batch, n_vars) but var_types is (n_vars,),
+        # we need to expand var_types or flatten pred/target
+        
+        if pred.dim() > 1 and var_types.dim() == 1:
+            # Case: pred is (batch, n_vars), var_types is (n_vars,)
+            # Expand var_types to (batch, n_vars)
+            var_types = var_types.unsqueeze(0).expand_as(pred)
+        
         # Binary variables: BCE loss
         binary_mask = var_types == VAR_BINARY
         if binary_mask.any():

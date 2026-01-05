@@ -296,17 +296,30 @@ class SFTTrainer:
             data = prepared['data']
             
             # New format: COO components stored separately
+            # Note: PyG DataLoader batches these, so we need to extract per-sample
             if hasattr(data, 'A_row'):
-                indices = torch.stack([data.A_row.long(), data.A_col.long()])
-                # Convert A_shape to tuple (handles tensor, list, or tuple)
-                if isinstance(data.A_shape, torch.Tensor):
-                    shape_tuple = tuple(data.A_shape.tolist())
-                elif isinstance(data.A_shape, (list, tuple)):
-                    shape_tuple = tuple(data.A_shape)
+                # For batched data, A_row/A_col/A_val are concatenated
+                # A_shape becomes batched tensor [batch_size, 2]
+                # We only support batch_size=1 for constraint info
+                A_row = data.A_row.flatten().long()
+                A_col = data.A_col.flatten().long()
+                A_val = data.A_val.flatten().float()
+                
+                # Handle A_shape: could be (n_constrs, n_vars) tuple, 
+                # [n_constrs, n_vars] tensor, or batched [batch, 2] tensor
+                A_shape = data.A_shape
+                if isinstance(A_shape, torch.Tensor):
+                    if A_shape.dim() == 2:  # Batched: [batch, 2]
+                        A_shape = A_shape[0]  # Take first sample
+                    shape_tuple = (int(A_shape[0].item()), int(A_shape[1].item()))
+                elif isinstance(A_shape, (list, tuple)):
+                    shape_tuple = (int(A_shape[0]), int(A_shape[1]))
                 else:
-                    shape_tuple = (int(data.A_shape[0]), int(data.A_shape[1]))
+                    raise ValueError(f"Unknown A_shape type: {type(A_shape)}")
+                
+                indices = torch.stack([A_row, A_col], dim=0)
                 A = torch.sparse_coo_tensor(
-                    indices, data.A_val, shape_tuple
+                    indices, A_val, shape_tuple
                 ).to(self.device)
                 return {
                     'A': A,

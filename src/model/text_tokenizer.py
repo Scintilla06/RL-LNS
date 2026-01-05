@@ -31,6 +31,7 @@ class VariablePositionMapper:
         self, 
         text: str, 
         input_ids: torch.Tensor,
+        offset_mapping: Optional[torch.Tensor] = None,
     ) -> Dict[int, List[int]]:
         """
         Map variable indices to token positions.
@@ -38,19 +39,22 @@ class VariablePositionMapper:
         Args:
             text: Original text string.
             input_ids: Tokenized input ids.
+            offset_mapping: Pre-computed offset mapping (optional, avoids re-tokenization).
         
         Returns:
             Dict mapping var_idx to list of token positions.
         """
-        # Use tokenizer's offset mapping if available
-        encoding = self.tokenizer(
-            text,
-            return_offsets_mapping=True,
-            return_tensors='pt',
-            truncation=False,
-        )
-        
-        offset_mapping = encoding.get('offset_mapping', None)
+        # Only tokenize if offset_mapping not provided
+        if offset_mapping is None:
+            encoding = self.tokenizer(
+                text,
+                return_offsets_mapping=True,
+                return_tensors='pt',
+                truncation=False,
+            )
+            offset_mapping = encoding.get('offset_mapping', None)
+            if offset_mapping is not None:
+                offset_mapping = offset_mapping[0]
         
         var_positions = {}
         
@@ -63,7 +67,7 @@ class VariablePositionMapper:
             if offset_mapping is not None:
                 # Use offset mapping for precise token positions
                 token_positions = self._char_to_token_positions(
-                    offset_mapping[0], char_start, char_end
+                    offset_mapping, char_start, char_end
                 )
             else:
                 # Fallback: estimate based on character position
@@ -250,16 +254,20 @@ class ChunkedTextEncoder(nn.Module):
         Returns:
             Dict with 'chunks', 'var_positions', 'var_chunk_map', 'n_vars'.
         """
-        # Tokenize full text
+        # Tokenize full text with offset_mapping
         encoding = self.tokenizer(
             text,
             return_tensors='pt',
+            return_offsets_mapping=True,
             truncation=False,
         )
         input_ids = encoding['input_ids'].squeeze(0)
+        offset_mapping = encoding.get('offset_mapping')
+        if offset_mapping is not None:
+            offset_mapping = offset_mapping[0]  # Remove batch dim
         
-        # Get variable positions
-        var_positions = self.position_mapper.map_variables(text, input_ids)
+        # Get variable positions (pass offset_mapping to avoid re-tokenization)
+        var_positions = self.position_mapper.map_variables(text, input_ids, offset_mapping=offset_mapping)
         n_vars = max(var_positions.keys()) + 1 if var_positions else 0
         
         # Create chunks
@@ -377,13 +385,17 @@ class TextTokenizerWrapper(nn.Module):
         Returns:
             Tuple of (var_hiddens, n_vars).
         """
-        # Tokenize to check length
+        # Tokenize once with offset_mapping to avoid re-tokenization later
         encoding = self.tokenizer(
             text,
             return_tensors='pt',
+            return_offsets_mapping=True,
             truncation=False,
         )
         seq_len = encoding['input_ids'].size(1)
+        offset_mapping = encoding.get('offset_mapping')
+        if offset_mapping is not None:
+            offset_mapping = offset_mapping[0]  # Remove batch dim
         
         if seq_len <= self.max_length:
             # Direct processing
@@ -399,9 +411,9 @@ class TextTokenizerWrapper(nn.Module):
             # Get last layer hidden state from hidden_states tuple
             hidden = outputs.hidden_states[-1]
             
-            # Get variable positions and aggregate
+            # Get variable positions and aggregate (pass offset_mapping to avoid re-tokenization)
             var_positions = self.chunked_encoder.position_mapper.map_variables(
-                text, encoding['input_ids'].squeeze(0)
+                text, encoding['input_ids'].squeeze(0), offset_mapping=offset_mapping
             )
             n_vars = max(var_positions.keys()) + 1 if var_positions else 0
             

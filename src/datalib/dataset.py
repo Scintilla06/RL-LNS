@@ -162,7 +162,7 @@ class MILPTextDataset(Dataset):
         # Tokenize if tokenizer provided
         if self.tokenizer is not None:
             encoding = self.tokenizer(
-                sample.text,
+                text,
                 truncation=False,
                 return_tensors='pt',
             )

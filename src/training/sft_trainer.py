@@ -313,7 +313,17 @@ class SFTTrainer:
                         A_shape = A_shape[0]  # Take first sample
                     shape_tuple = (int(A_shape[0].item()), int(A_shape[1].item()))
                 elif isinstance(A_shape, (list, tuple)):
-                    shape_tuple = (int(A_shape[0]), int(A_shape[1]))
+                    # Could be nested list from batching: [[n_constrs, n_vars], ...]
+                    first = A_shape[0]
+                    if isinstance(first, (list, tuple, torch.Tensor)):
+                        # Nested - take first sample
+                        if isinstance(first, torch.Tensor):
+                            shape_tuple = (int(first[0].item()), int(first[1].item()))
+                        else:
+                            shape_tuple = (int(first[0]), int(first[1]))
+                    else:
+                        # Simple tuple (n_constrs, n_vars)
+                        shape_tuple = (int(A_shape[0]), int(A_shape[1]))
                 else:
                     raise ValueError(f"Unknown A_shape type: {type(A_shape)}")
                 

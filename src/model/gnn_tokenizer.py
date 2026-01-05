@@ -199,6 +199,100 @@ class DegreeEncoder(nn.Module):
         return self.embedding(deg)
 
 
+class VariableTypeEncoder(nn.Module):
+    """
+    Encode variable types as learnable embeddings.
+    
+    Variable types:
+    - 0: Binary (0/1)
+    - 1: Continuous
+    - 2: Integer
+    """
+    
+    def __init__(self, hidden_dim: int = 64):
+        """
+        Args:
+            hidden_dim: Embedding dimension.
+        """
+        super().__init__()
+        # 3 types: Binary, Continuous, Integer
+        self.embedding = nn.Embedding(3, hidden_dim)
+    
+    def forward(self, var_types: torch.Tensor) -> torch.Tensor:
+        """
+        Compute type embeddings.
+        
+        Args:
+            var_types: Variable type indices (n_vars,), values in {0, 1, 2}.
+        
+        Returns:
+            Type embeddings of shape (n_vars, hidden_dim).
+        """
+        return self.embedding(var_types)
+
+
+class BoundsEncoder(nn.Module):
+    """
+    Encode variable bounds using Log-Normalization and Fourier MLP.
+    
+    For mixed-variable MILP, bounds contain important feasible region information.
+    Uses log-normalization for numerical stability with large ranges.
+    """
+    
+    def __init__(self, hidden_dim: int = 64, num_fourier_freqs: int = 4):
+        """
+        Args:
+            hidden_dim: Output dimension.
+            num_fourier_freqs: Number of Fourier frequencies.
+        """
+        super().__init__()
+        
+        # Fourier feature mapper for bounds (2 features: lb, ub)
+        self.fourier = FourierFeatureMapper(2, num_fourier_freqs, include_input=True)
+        
+        # MLP to project to hidden_dim
+        self.mlp = nn.Sequential(
+            nn.Linear(self.fourier.output_dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, hidden_dim),
+        )
+    
+    def _log_normalize(self, bounds: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
+        """
+        Apply log-normalization to handle large ranges.
+        
+        sign(x) * log(1 + |x|)
+        
+        Args:
+            bounds: Raw bounds values.
+            eps: Small value for numerical stability.
+        
+        Returns:
+            Log-normalized bounds.
+        """
+        sign = torch.sign(bounds)
+        return sign * torch.log1p(torch.abs(bounds) + eps)
+    
+    def forward(self, lb: torch.Tensor, ub: torch.Tensor) -> torch.Tensor:
+        """
+        Encode variable bounds.
+        
+        Args:
+            lb: Lower bounds (n_vars,).
+            ub: Upper bounds (n_vars,).
+        
+        Returns:
+            Bounds embeddings of shape (n_vars, hidden_dim).
+        """
+        # Stack and log-normalize
+        bounds = torch.stack([lb, ub], dim=-1)  # (n_vars, 2)
+        bounds_norm = self._log_normalize(bounds)
+        
+        # Apply Fourier features and MLP
+        fourier_feat = self.fourier(bounds_norm)
+        return self.mlp(fourier_feat)
+
+
 class BipartiteGNNLayer(nn.Module):
     """
     Single layer of bipartite GNN for MILP graph.
@@ -297,6 +391,10 @@ class BipartiteGNN(nn.Module):
     
     Encodes variable and constraint nodes, then concatenates them
     in fixed order [variables, constraints] to form input sequence for LLM.
+    
+    Supports mixed variable types (Binary, Integer, Continuous) with:
+    - Type embeddings for variables
+    - Log-normalized bounds encoding
     """
     
     def __init__(
@@ -311,6 +409,8 @@ class BipartiteGNN(nn.Module):
         rwpe_walk_length: int = 16,
         use_rwpe: bool = True,
         use_degree: bool = True,
+        use_var_type: bool = True,
+        use_bounds_encoding: bool = True,
     ):
         """
         Args:
@@ -324,12 +424,16 @@ class BipartiteGNN(nn.Module):
             rwpe_walk_length: Random walk length for RWPE.
             use_rwpe: Whether to use RWPE.
             use_degree: Whether to use degree encoding.
+            use_var_type: Whether to use variable type embedding.
+            use_bounds_encoding: Whether to use bounds encoding (for mixed-variable).
         """
         super().__init__()
         
         self.hidden_dim = hidden_dim
         self.use_rwpe = use_rwpe
         self.use_degree = use_degree
+        self.use_var_type = use_var_type
+        self.use_bounds_encoding = use_bounds_encoding
         
         # Feature encoders
         self.var_fourier = FourierFeatureMapper(var_input_dim, num_fourier_freqs)
@@ -351,6 +455,16 @@ class BipartiteGNN(nn.Module):
             var_feat_dim += hidden_dim // 4
             constr_feat_dim += hidden_dim // 4
         
+        # Variable type embedding (Binary, Continuous, Integer)
+        if use_var_type:
+            self.var_type_enc = VariableTypeEncoder(hidden_dim // 4)
+            var_feat_dim += hidden_dim // 4
+        
+        # Bounds encoding for mixed-variable MILP
+        if use_bounds_encoding:
+            self.bounds_enc = BoundsEncoder(hidden_dim // 4, num_fourier_freqs // 2)
+            var_feat_dim += hidden_dim // 4
+        
         # Input projections
         self.var_input_proj = nn.Linear(var_feat_dim, hidden_dim)
         self.constr_input_proj = nn.Linear(constr_feat_dim, hidden_dim)
@@ -371,6 +485,9 @@ class BipartiteGNN(nn.Module):
         
         Args:
             data: HeteroData with 'var' and 'constr' node types.
+                  var.x: (n_vars, var_input_dim) - [obj_coeff, lb, ub, x_lp]
+                  var.var_types: (n_vars,) - Variable types {0: Binary, 1: Continuous, 2: Integer}
+                  constr.x: (n_constrs, constr_input_dim) - [rhs, sense_onehot]
         
         Returns:
             Node embeddings of shape (n_vars + n_constrs, hidden_dim).
@@ -388,8 +505,12 @@ class BipartiteGNN(nn.Module):
         n_constrs = x_constr.size(0)
         n_nodes = n_vars + n_constrs
         
+        # Extract bounds for bounds encoding (columns 1 and 2 are lb and ub)
+        var_lb = x_var[:, 1]  # Lower bounds
+        var_ub = x_var[:, 2]  # Upper bounds
+        
         # Apply Fourier feature mapping
-        x_var = self.var_fourier(x_var)
+        x_var_fourier = self.var_fourier(x_var)
         x_constr = self.constr_fourier(x_constr)
         edge_attr = self.edge_fourier(edge_attr)
         
@@ -403,16 +524,31 @@ class BipartiteGNN(nn.Module):
         # Add positional encodings
         if self.use_rwpe:
             rwpe = self.rwpe(combined_edge_index, n_nodes)
-            x_var = torch.cat([x_var, rwpe[:n_vars]], dim=-1)
+            x_var_fourier = torch.cat([x_var_fourier, rwpe[:n_vars]], dim=-1)
             x_constr = torch.cat([x_constr, rwpe[n_vars:]], dim=-1)
         
         if self.use_degree:
             deg_enc = self.degree_enc(combined_edge_index, n_nodes)
-            x_var = torch.cat([x_var, deg_enc[:n_vars]], dim=-1)
+            x_var_fourier = torch.cat([x_var_fourier, deg_enc[:n_vars]], dim=-1)
             x_constr = torch.cat([x_constr, deg_enc[n_vars:]], dim=-1)
         
+        # Add variable type embedding (if available)
+        if self.use_var_type:
+            if hasattr(data['var'], 'var_types') and data['var'].var_types is not None:
+                var_types = data['var'].var_types
+            else:
+                # Default to binary (0) if not specified
+                var_types = torch.zeros(n_vars, dtype=torch.long, device=x_var.device)
+            type_enc = self.var_type_enc(var_types)
+            x_var_fourier = torch.cat([x_var_fourier, type_enc], dim=-1)
+        
+        # Add bounds encoding (log-normalized Fourier features)
+        if self.use_bounds_encoding:
+            bounds_enc = self.bounds_enc(var_lb, var_ub)
+            x_var_fourier = torch.cat([x_var_fourier, bounds_enc], dim=-1)
+        
         # Project to hidden dim
-        x_var = self.var_input_proj(x_var)
+        x_var = self.var_input_proj(x_var_fourier)
         x_constr = self.constr_input_proj(x_constr)
         edge_attr = self.edge_proj(edge_attr)
         

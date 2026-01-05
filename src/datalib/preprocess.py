@@ -156,9 +156,49 @@ class LPFormatParser:
     @staticmethod
     def _parse_bounds(line: str, bounds: Dict):
         """Parse bounds line."""
-        # Simple bounds: x[0] <= 1, x[0] >= 0, 0 <= x[0] <= 1
-        pass  # For binary/01 problems, bounds are typically 0-1
-    
+        # Handle "x[i] free"
+        if 'free' in line.lower():
+            match = re.search(r'x\[(\d+)\]', line)
+            if match:
+                var_idx = int(match.group(1))
+                bounds[var_idx] = (-float('inf'), float('inf'))
+            return
+
+        # Handle "l <= x[i] <= u"
+        match_double = re.search(r'([+-]?\d*\.?\d+)\s*<=\s*x\[(\d+)\]\s*<=\s*([+-]?\d*\.?\d+)', line)
+        if match_double:
+            lb = float(match_double.group(1))
+            var_idx = int(match_double.group(2))
+            ub = float(match_double.group(3))
+            bounds[var_idx] = (lb, ub)
+            return
+
+        # Handle "x[i] >= l" or "l <= x[i]"
+        match_ge = re.search(r'x\[(\d+)\]\s*>=\s*([+-]?\d*\.?\d+)', line)
+        if match_ge:
+            var_idx = int(match_ge.group(1))
+            lb = float(match_ge.group(2))
+            current = bounds.get(var_idx, (0.0, float('inf')))
+            bounds[var_idx] = (lb, current[1])
+            return
+            
+        match_le_rev = re.search(r'([+-]?\d*\.?\d+)\s*<=\s*x\[(\d+)\]', line)
+        if match_le_rev:
+            lb = float(match_le_rev.group(1))
+            var_idx = int(match_le_rev.group(2))
+            current = bounds.get(var_idx, (0.0, float('inf')))
+            bounds[var_idx] = (lb, current[1])
+            return
+
+        # Handle "x[i] <= u" or "u >= x[i]"
+        match_le = re.search(r'x\[(\d+)\]\s*<=\s*([+-]?\d*\.?\d+)', line)
+        if match_le:
+            var_idx = int(match_le.group(1))
+            ub = float(match_le.group(2))
+            current = bounds.get(var_idx, (0.0, float('inf')))
+            bounds[var_idx] = (current[0], ub)
+            return
+
     @staticmethod
     def _build_instance(
         obj_terms: List[Tuple[int, float]],
@@ -217,14 +257,36 @@ class LPFormatParser:
         for var_idx, coeff in obj_terms:
             obj_coeffs[var_idx] = coeff
         
+        # Default bounds: 0 <= x <= inf (standard LP assumption)
         var_lb = np.zeros(n_vars)
-        var_ub = np.ones(n_vars)  # Default for binary
-        var_types = np.zeros(n_vars, dtype=np.int32)  # Default binary
+        var_ub = np.full(n_vars, float('inf'))
         
+        # Apply parsed bounds
+        for var_idx, (lb, ub) in bounds.items():
+            if var_idx < n_vars:
+                var_lb[var_idx] = lb
+                var_ub[var_idx] = ub
+        
+        # Determine variable types
+        # Default to Continuous (1)
+        var_types = np.ones(n_vars, dtype=np.int32)
+        
+        # Apply Binaries (0)
+        for var_str in binaries:
+            var_idx = int(var_str)
+            if var_idx < n_vars:
+                var_types[var_idx] = 0
+                # Binaries imply 0 <= x <= 1 unless specified otherwise
+                if var_idx not in bounds:
+                    var_lb[var_idx] = 0.0
+                    var_ub[var_idx] = 1.0
+        
+        # Apply Generals/Integers (2)
         for var_str in generals:
             var_idx = int(var_str)
             if var_idx < n_vars:
-                var_types[var_idx] = 2  # Integer
+                var_types[var_idx] = 2
+                # Integers usually default to 0 <= x <= inf if not bounded
         
         return MILPInstance(
             n_vars=n_vars,
@@ -399,6 +461,9 @@ class GraphBuilder:
         data['var'].x = torch.tensor(var_features, dtype=torch.float32)
         data['var'].n_nodes = instance.n_vars
         
+        # Add variable types as a node attribute (for GNN type embedding)
+        data['var'].var_types = torch.tensor(instance.var_types, dtype=torch.long)  # (n_vars,)
+        
         data['constr'].x = torch.tensor(constr_features, dtype=torch.float32)
         data['constr'].n_nodes = instance.n_constrs
         
@@ -430,19 +495,35 @@ class GraphBuilder:
         data.b = torch.tensor(instance.constr_rhs, dtype=torch.float32)  # (n_constrs,)
         data.sense = torch.tensor(instance.constr_sense, dtype=torch.long)  # (n_constrs,)
         
-        # Store variable types for future general MILP support
+        # Store variable types and bounds for mixed-variable MILP support
         data.var_types = torch.tensor(instance.var_types, dtype=torch.long)  # (n_vars,)
+        data.var_lb = torch.tensor(instance.var_lb, dtype=torch.float32)  # (n_vars,)
+        data.var_ub = torch.tensor(instance.var_ub, dtype=torch.float32)  # (n_vars,)
         
         return data
 
 
 class TextFormatter:
-    """Format MILP instance as text with variable position tracking."""
+    """
+    Format MILP instance as text with variable position tracking.
+    
+    For mixed-variable MILP, follows LP format standard with:
+    - Bounds section
+    - Generals section (for integer variables)
+    - Binaries section (for 0/1 variables)
+    
+    This allows LLM's attention mechanism to capture variable type context.
+    """
+    
+    # Variable type constants
+    VAR_BINARY = 0
+    VAR_CONTINUOUS = 1
+    VAR_INTEGER = 2
     
     @staticmethod
     def format(instance: MILPInstance) -> Tuple[str, Dict[int, Tuple[int, int]]]:
         """
-        Format MILP instance as text string.
+        Format MILP instance as text string with LP format structure.
         
         Args:
             instance: MILPInstance object.
@@ -493,6 +574,42 @@ class TextFormatter:
             constr_str = f"  c{i}: " + " + ".join(term_strs) + f" {sense_str} {instance.constr_rhs[i]:.6f}"
             lines.append(constr_str)
             current_pos += len(lines[-1]) + 1
+        
+        # Bounds section (explicit bounds for all variables)
+        lines.append("Bounds")
+        current_pos += len(lines[-1]) + 1
+        
+        for i in range(instance.n_vars):
+            lb = instance.var_lb[i]
+            ub = instance.var_ub[i]
+            # Format: lb <= x[i] <= ub
+            if lb == 0 and ub == 1 and instance.var_types[i] == TextFormatter.VAR_BINARY:
+                # Binary variables have implicit [0, 1] bounds
+                continue
+            bound_str = f"  {lb:.6f} <= x[{i}] <= {ub:.6f}"
+            lines.append(bound_str)
+            current_pos += len(lines[-1]) + 1
+        
+        # Generals section (integer variables)
+        generals = [i for i in range(instance.n_vars) if instance.var_types[i] == TextFormatter.VAR_INTEGER]
+        if generals:
+            lines.append("Generals")
+            current_pos += len(lines[-1]) + 1
+            general_vars = " ".join([f"x[{i}]" for i in generals])
+            lines.append(f"  {general_vars}")
+            current_pos += len(lines[-1]) + 1
+        
+        # Binaries section (binary variables)
+        binaries = [i for i in range(instance.n_vars) if instance.var_types[i] == TextFormatter.VAR_BINARY]
+        if binaries:
+            lines.append("Binaries")
+            current_pos += len(lines[-1]) + 1
+            binary_vars = " ".join([f"x[{i}]" for i in binaries])
+            lines.append(f"  {binary_vars}")
+            current_pos += len(lines[-1]) + 1
+        
+        # End
+        lines.append("End")
         
         text = "\n".join(lines)
         return text, var_positions

@@ -2,9 +2,11 @@
 Physics-informed loss functions for MILP solution prediction.
 
 Implements:
-- Task Loss: BCE for binary variables
+- Task Loss: BCE for binary variables, Huber for integer/continuous
 - Constraint Loss: Penalizes constraint violations
-- Integrality Loss: Pushes predictions toward integer values
+- Integrality Loss: Pushes predictions toward integer values (only for integer vars)
+
+Supports mixed variable types (Binary, Integer, Continuous).
 """
 
 import torch
@@ -14,47 +16,106 @@ from typing import Optional, Tuple, Dict, Any, List
 import numpy as np
 
 
+# Variable type constants
+VAR_BINARY = 0
+VAR_CONTINUOUS = 1
+VAR_INTEGER = 2
+
+
 class TaskLoss(nn.Module):
     """
-    Task loss for binary variable prediction.
+    Task loss for mixed-variable MILP prediction.
     
-    Uses Binary Cross Entropy against optimal solution labels.
+    Uses stratified loss based on variable type:
+    - Binary: Binary Cross Entropy
+    - Integer/Continuous: Huber Loss (SmoothL1)
     """
     
-    def __init__(self, label_smoothing: float = 0.0):
+    def __init__(self, label_smoothing: float = 0.0, huber_delta: float = 1.0):
         """
         Args:
-            label_smoothing: Label smoothing factor (0 = no smoothing).
+            label_smoothing: Label smoothing factor for binary variables.
+            huber_delta: Delta parameter for Huber loss.
         """
         super().__init__()
         self.label_smoothing = label_smoothing
+        self.huber_delta = huber_delta
     
     def forward(
         self, 
         pred: torch.Tensor, 
         target: torch.Tensor,
+        var_types: Optional[torch.Tensor] = None,
         weight: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
-        Compute BCE loss.
+        Compute stratified task loss.
         
         Args:
-            pred: Predicted probabilities (n_vars,) or (batch, n_vars).
+            pred: Predicted values (n_vars,) or (batch, n_vars).
+                  For binary: logits (before sigmoid)
+                  For integer/continuous: predicted values
             target: Target labels (n_vars,) or (batch, n_vars).
+            var_types: Variable types (n_vars,) with values {0, 1, 2}.
+                      If None, assumes all binary.
             weight: Optional per-variable weights.
         
         Returns:
             Scalar loss value.
         """
-        # Apply label smoothing
-        if self.label_smoothing > 0:
-            target = target * (1 - self.label_smoothing) + 0.5 * self.label_smoothing
+        if var_types is None:
+            # Backward compatible: assume all binary
+            if self.label_smoothing > 0:
+                target = target * (1 - self.label_smoothing) + 0.5 * self.label_smoothing
+            loss = F.binary_cross_entropy_with_logits(pred, target, weight=weight, reduction='none')
+            return loss.mean()
         
-        # Compute BCE
-        # loss = F.binary_cross_entropy(pred, target, weight=weight, reduction='none')
-        loss = F.binary_cross_entropy_with_logits(pred, target, weight=weight, reduction='none')
+        total_loss = torch.tensor(0.0, device=pred.device)
+        count = 0
         
-        return loss.mean()
+        # Binary variables: BCE loss
+        binary_mask = var_types == VAR_BINARY
+        if binary_mask.any():
+            binary_pred = pred[binary_mask]
+            binary_target = target[binary_mask]
+            
+            if self.label_smoothing > 0:
+                binary_target = binary_target * (1 - self.label_smoothing) + 0.5 * self.label_smoothing
+            
+            binary_weight = weight[binary_mask] if weight is not None else None
+            binary_loss = F.binary_cross_entropy_with_logits(
+                binary_pred, binary_target, weight=binary_weight, reduction='mean'
+            )
+            total_loss = total_loss + binary_loss * binary_mask.sum()
+            count += binary_mask.sum()
+        
+        # Integer variables: Huber loss
+        integer_mask = var_types == VAR_INTEGER
+        if integer_mask.any():
+            integer_pred = pred[integer_mask]
+            integer_target = target[integer_mask]
+            
+            integer_loss = F.smooth_l1_loss(
+                integer_pred, integer_target, beta=self.huber_delta, reduction='mean'
+            )
+            total_loss = total_loss + integer_loss * integer_mask.sum()
+            count += integer_mask.sum()
+        
+        # Continuous variables: Huber loss
+        continuous_mask = var_types == VAR_CONTINUOUS
+        if continuous_mask.any():
+            continuous_pred = pred[continuous_mask]
+            continuous_target = target[continuous_mask]
+            
+            continuous_loss = F.smooth_l1_loss(
+                continuous_pred, continuous_target, beta=self.huber_delta, reduction='mean'
+            )
+            total_loss = total_loss + continuous_loss * continuous_mask.sum()
+            count += continuous_mask.sum()
+        
+        if count > 0:
+            return total_loss / count
+        return total_loss
 
 
 class ConstraintLoss(nn.Module):
@@ -74,6 +135,34 @@ class ConstraintLoss(nn.Module):
         super().__init__()
         self.reduction = reduction
     
+    def _get_solution_values(
+        self,
+        pred: torch.Tensor,
+        var_types: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """
+        Get solution values from predictions based on variable types.
+        
+        For constraint checking, we need actual values:
+        - Binary: sigmoid(pred) gives probability in (0, 1)
+        - Integer/Continuous: pred gives direct value
+        """
+        if var_types is None:
+            # Backward compatible: assume all binary
+            return torch.sigmoid(pred)
+        
+        values = pred.clone()
+        
+        # Binary: apply sigmoid
+        binary_mask = var_types == VAR_BINARY
+        if binary_mask.any():
+            values[binary_mask] = torch.sigmoid(pred[binary_mask])
+        
+        # Integer and Continuous: use raw values (already in value space)
+        # No transformation needed
+        
+        return values
+    
     def forward(
         self,
         pred: torch.Tensor,
@@ -82,9 +171,10 @@ class ConstraintLoss(nn.Module):
         constr_sense: torch.Tensor,
         n_vars: int,
         n_constrs: int,
+        var_types: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
-        Compute constraint violation loss.
+        Compute constraint violation loss for mixed-variable MILP.
         
         Args:
             pred: Predicted solution (n_vars,).
@@ -93,20 +183,21 @@ class ConstraintLoss(nn.Module):
             constr_sense: Constraint sense (n_constrs,): 1=<=, 2=>=, 3===.
             n_vars: Number of variables.
             n_constrs: Number of constraints.
+            var_types: Variable types (n_vars,). If None, assumes all binary.
         
         Returns:
             Constraint violation loss.
         """
         device = pred.device
         
+        # Get solution values (handles different variable types)
+        values = self._get_solution_values(pred, var_types)
+        
         # Compute Ax for each constraint
         ax = torch.zeros(n_constrs, device=device)
         
-        # Use sigmoid to get probabilities for constraint calculation
-        probs = torch.sigmoid(pred)
-        
         for constr_idx, var_idx, coeff in constr_matrix:
-            ax[constr_idx] += coeff * probs[var_idx]
+            ax[constr_idx] += coeff * values[var_idx]
         
         # Compute violations based on constraint sense
         violations = torch.zeros(n_constrs, device=device)
@@ -137,6 +228,7 @@ class ConstraintLoss(nn.Module):
         A: torch.Tensor,
         b: torch.Tensor,
         sense: torch.Tensor,
+        var_types: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
         Batch version using dense constraint matrix.
@@ -146,18 +238,22 @@ class ConstraintLoss(nn.Module):
             A: Constraint matrix (n_constrs, n_vars).
             b: RHS values (n_constrs,).
             sense: Constraint sense (n_constrs,).
+            var_types: Variable types (n_vars,). If None, assumes all binary.
         
         Returns:
             Constraint violation loss.
         """
         if pred.dim() == 1:
             pred = pred.unsqueeze(0)
-            
-        # Use sigmoid to get probabilities for constraint calculation
-        probs = torch.sigmoid(pred)
+        
+        # Get solution values (handles different variable types)
+        if var_types is not None:
+            values = self._get_solution_values(pred.squeeze(0), var_types).unsqueeze(0)
+        else:
+            values = torch.sigmoid(pred)
         
         # Compute Ax: (batch, n_constrs)
-        ax = torch.matmul(probs, A.T)
+        ax = torch.matmul(values, A.T)
         
         # Expand b for batch: (1, n_constrs)
         b = b.unsqueeze(0)
@@ -190,6 +286,11 @@ class IntegralityLoss(nn.Module):
     L_int = sum_j (1 - cos(2 * pi * x_j))
     
     This loss is 0 when x_j is an integer and maximum when x_j = 0.5.
+    
+    IMPORTANT: For mixed-variable MILP:
+    - Binary variables: Always applied (they must be 0 or 1)
+    - Integer variables: Applied to push toward integers
+    - Continuous variables: NEVER applied (would force continuous to integers)
     """
     
     def __init__(self, reduction: str = "mean"):
@@ -200,35 +301,83 @@ class IntegralityLoss(nn.Module):
         super().__init__()
         self.reduction = reduction
     
-    def forward(self, pred: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self, 
+        pred: torch.Tensor,
+        var_types: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         """
-        Compute integrality loss.
+        Compute selective integrality loss.
         
         Args:
             pred: Predicted values (n_vars,) or (batch, n_vars).
+                  For binary: should be logits (will apply sigmoid)
+                  For integer: raw values
+            var_types: Variable types (n_vars,) with values {0, 1, 2}.
+                      If None, assumes all binary (backward compatible).
         
         Returns:
-            Integrality loss.
+            Integrality loss (only for binary and integer variables).
         """
-        # Use sigmoid to get probabilities
-        probs = torch.sigmoid(pred)
+        if var_types is None:
+            # Backward compatible: assume all binary
+            probs = torch.sigmoid(pred)
+            loss = 1 - torch.cos(2 * torch.pi * probs)
+            
+            if self.reduction == "mean":
+                return loss.mean()
+            elif self.reduction == "sum":
+                return loss.sum()
+            else:
+                return loss
         
-        # Periodic cosine loss
-        loss = 1 - torch.cos(2 * torch.pi * probs)
+        # Create mask for variables that need integrality
+        # Binary (0) and Integer (2), NOT Continuous (1)
+        integrality_mask = (var_types == VAR_BINARY) | (var_types == VAR_INTEGER)
+        
+        if not integrality_mask.any():
+            return torch.tensor(0.0, device=pred.device)
+        
+        # Compute loss only for masked variables
+        masked_pred = pred[integrality_mask]
+        
+        # For binary variables, apply sigmoid first
+        binary_in_mask = var_types[integrality_mask] == VAR_BINARY
+        
+        loss_values = torch.zeros_like(masked_pred)
+        
+        # Binary: use sigmoid output
+        if binary_in_mask.any():
+            binary_probs = torch.sigmoid(masked_pred[binary_in_mask])
+            loss_values[binary_in_mask] = 1 - torch.cos(2 * torch.pi * binary_probs)
+        
+        # Integer: use raw values
+        integer_in_mask = var_types[integrality_mask] == VAR_INTEGER
+        if integer_in_mask.any():
+            integer_vals = masked_pred[integer_in_mask]
+            loss_values[integer_in_mask] = 1 - torch.cos(2 * torch.pi * integer_vals)
         
         if self.reduction == "mean":
-            return loss.mean()
+            return loss_values.mean()
         elif self.reduction == "sum":
-            return loss.sum()
+            return loss_values.sum()
         else:
-            return loss
+            # Return full-size tensor with zeros for continuous
+            full_loss = torch.zeros_like(pred)
+            full_loss[integrality_mask] = loss_values
+            return full_loss
 
 
 class PhysicsInformedLoss(nn.Module):
     """
-    Combined physics-informed loss for MILP solution prediction.
+    Combined physics-informed loss for mixed-variable MILP solution prediction.
     
     L = L_task + lambda_1 * L_constraint + lambda_2 * L_integrality
+    
+    Supports:
+    - Stratified task loss (BCE for binary, Huber for integer/continuous)
+    - Selective integrality loss (only for binary and integer variables)
+    - Unified constraint penalty (for all variable types)
     """
     
     def __init__(
@@ -236,19 +385,21 @@ class PhysicsInformedLoss(nn.Module):
         lambda_constraint: float = 0.1,
         lambda_integrality: float = 0.01,
         label_smoothing: float = 0.0,
+        huber_delta: float = 1.0,
     ):
         """
         Args:
             lambda_constraint: Weight for constraint loss.
             lambda_integrality: Weight for integrality loss.
-            label_smoothing: Label smoothing for task loss.
+            label_smoothing: Label smoothing for binary task loss.
+            huber_delta: Delta parameter for Huber loss (integer/continuous).
         """
         super().__init__()
         
         self.lambda_constraint = lambda_constraint
         self.lambda_integrality = lambda_integrality
         
-        self.task_loss = TaskLoss(label_smoothing=label_smoothing)
+        self.task_loss = TaskLoss(label_smoothing=label_smoothing, huber_delta=huber_delta)
         self.constraint_loss = ConstraintLoss()
         self.integrality_loss = IntegralityLoss()
     
@@ -256,6 +407,7 @@ class PhysicsInformedLoss(nn.Module):
         self,
         pred: torch.Tensor,
         target: torch.Tensor,
+        var_types: Optional[torch.Tensor] = None,
         constr_matrix: Optional[List[Tuple[int, int, float]]] = None,
         constr_rhs: Optional[torch.Tensor] = None,
         constr_sense: Optional[torch.Tensor] = None,
@@ -266,13 +418,15 @@ class PhysicsInformedLoss(nn.Module):
         sense: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
         """
-        Compute combined physics-informed loss.
+        Compute combined physics-informed loss for mixed-variable MILP.
         
         Supports both sparse (constr_matrix) and dense (A, b) constraint formats.
         
         Args:
-            pred: Predicted probabilities.
+            pred: Predicted values (logits for binary, values for others).
             target: Target labels.
+            var_types: Variable types (n_vars,) with values {0, 1, 2}.
+                      If None, assumes all binary.
             constr_matrix: Sparse constraint matrix (list format).
             constr_rhs: RHS values.
             constr_sense: Constraint sense.
@@ -285,23 +439,23 @@ class PhysicsInformedLoss(nn.Module):
         Returns:
             Dict with 'total', 'task', 'constraint', 'integrality' losses.
         """
-        # Task loss
-        l_task = self.task_loss(pred, target)
+        # Task loss (stratified based on var_types)
+        l_task = self.task_loss(pred, target, var_types=var_types)
         
-        # Constraint loss
+        # Constraint loss (unified for all variable types)
         if A is not None and b is not None and sense is not None:
             # Dense format
-            l_constr = self.constraint_loss.forward_batch(pred, A, b, sense)
+            l_constr = self.constraint_loss.forward_batch(pred, A, b, sense, var_types=var_types)
         elif constr_matrix is not None and constr_rhs is not None and constr_sense is not None:
             # Sparse format
             l_constr = self.constraint_loss(
-                pred, constr_matrix, constr_rhs, constr_sense, n_vars, n_constrs
+                pred, constr_matrix, constr_rhs, constr_sense, n_vars, n_constrs, var_types=var_types
             )
         else:
             l_constr = torch.tensor(0.0, device=pred.device)
         
-        # Integrality loss
-        l_int = self.integrality_loss(pred)
+        # Integrality loss (selective: only for binary and integer variables)
+        l_int = self.integrality_loss(pred, var_types=var_types)
         
         # Combined loss
         total = l_task + self.lambda_constraint * l_constr + self.lambda_integrality * l_int

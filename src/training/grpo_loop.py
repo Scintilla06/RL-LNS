@@ -149,25 +149,39 @@ class RewardCalculator:
         return advantages, info
 
 
+# Variable type constants
+VAR_BINARY = 0
+VAR_CONTINUOUS = 1
+VAR_INTEGER = 2
+
+
 class GroupSampler:
     """
     Sample groups of solutions from the model.
+    
+    Supports mixed variable types with appropriate sampling distributions:
+    - Binary: Bernoulli sampling
+    - Integer: Gaussian sampling + rounding
+    - Continuous: Gaussian sampling
     """
     
     def __init__(
         self,
         group_size: int = 16,
         temperature: float = 1.0,
+        sigma: float = 0.5,
         top_k: Optional[int] = None,
     ):
         """
         Args:
             group_size: Number of samples per instance (G).
-            temperature: Sampling temperature.
+            temperature: Sampling temperature for binary variables.
+            sigma: Standard deviation for Gaussian sampling (integer/continuous).
             top_k: If set, sample from top-k predictions.
         """
         self.group_size = group_size
         self.temperature = temperature
+        self.sigma = sigma
         self.top_k = top_k
     
     def sample(
@@ -175,51 +189,136 @@ class GroupSampler:
         model: NeuroSolver,
         data: Any,
         mode: str = "gnn",
+        var_types: Optional[torch.Tensor] = None,
+        var_lb: Optional[torch.Tensor] = None,
+        var_ub: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        Sample G solutions from the model.
+        Sample G solutions from the model using type-appropriate distributions.
         
         Args:
             model: NeuroSolver model.
             data: Input data.
             mode: Model mode ("gnn" or "text").
+            var_types: Variable types (n_vars,). If None, assumes all binary.
+            var_lb: Lower bounds for variables.
+            var_ub: Upper bounds for variables.
         
         Returns:
             Tuple of (samples, log_probs, probs).
-            - samples: (G, n_vars) binary solutions
+            - samples: (G, n_vars) solutions
             - log_probs: (G, n_vars) log probabilities
-            - probs: (n_vars,) predicted probabilities
+            - probs/values: (n_vars,) predicted values
         """
         # Get model predictions
         output = model(data=data, mode=mode)
-        probs = output.primal  # (n_vars,)
+        pred_values = output.primal  # (n_vars,)
+        uncertainty = output.uncertainty  # (n_vars,) or None
         
-        # Apply temperature
-        if self.temperature != 1.0:
-            # Convert to logits, scale, convert back
-            logits = torch.log(probs / (1 - probs + 1e-8))
-            logits = logits / self.temperature
-            probs_scaled = torch.sigmoid(logits)
-        else:
-            probs_scaled = probs
-        
-        # Sample G solutions
-        n_vars = probs.size(0)
-        device = probs.device
+        n_vars = pred_values.size(0)
+        device = pred_values.device
         
         samples = torch.zeros(self.group_size, n_vars, device=device)
         log_probs = torch.zeros(self.group_size, n_vars, device=device)
         
-        for g in range(self.group_size):
-            # Bernoulli sampling
-            sample = torch.bernoulli(probs_scaled)
-            samples[g] = sample
+        if var_types is None:
+            # Backward compatible: assume all binary
+            probs = pred_values.clone()
             
-            # Compute log probability
-            lp = sample * torch.log(probs + 1e-8) + (1 - sample) * torch.log(1 - probs + 1e-8)
+            # Apply temperature
+            if self.temperature != 1.0:
+                logits = torch.log(probs / (1 - probs + 1e-8))
+                logits = logits / self.temperature
+                probs_scaled = torch.sigmoid(logits)
+            else:
+                probs_scaled = probs
+            
+            for g in range(self.group_size):
+                sample = torch.bernoulli(probs_scaled)
+                samples[g] = sample
+                lp = sample * torch.log(probs + 1e-8) + (1 - sample) * torch.log(1 - probs + 1e-8)
+                log_probs[g] = lp
+            
+            return samples, log_probs, probs
+        
+        # Mixed variable types: use appropriate distributions
+        binary_mask = var_types == VAR_BINARY
+        integer_mask = var_types == VAR_INTEGER
+        continuous_mask = var_types == VAR_CONTINUOUS
+        
+        for g in range(self.group_size):
+            sample = torch.zeros(n_vars, device=device)
+            lp = torch.zeros(n_vars, device=device)
+            
+            # Binary variables: Bernoulli sampling
+            if binary_mask.any():
+                probs = pred_values[binary_mask]
+                if self.temperature != 1.0:
+                    logits = torch.log(probs / (1 - probs + 1e-8))
+                    logits = logits / self.temperature
+                    probs_scaled = torch.sigmoid(logits)
+                else:
+                    probs_scaled = probs
+                
+                binary_sample = torch.bernoulli(probs_scaled)
+                sample[binary_mask] = binary_sample
+                
+                # Log probability for Bernoulli
+                lp_binary = binary_sample * torch.log(probs + 1e-8) + \
+                           (1 - binary_sample) * torch.log(1 - probs + 1e-8)
+                lp[binary_mask] = lp_binary
+            
+            # Integer variables: Gaussian sampling + rounding
+            if integer_mask.any():
+                mean = pred_values[integer_mask]
+                # Use uncertainty as variance if available
+                if uncertainty is not None:
+                    std = torch.sqrt(uncertainty[integer_mask])
+                else:
+                    std = torch.full_like(mean, self.sigma)
+                
+                noise = torch.randn_like(mean) * std
+                sampled = mean + noise
+                
+                # Round and clamp to bounds
+                rounded = torch.round(sampled)
+                if var_lb is not None and var_ub is not None:
+                    rounded = torch.clamp(rounded, var_lb[integer_mask], var_ub[integer_mask])
+                
+                sample[integer_mask] = rounded
+                
+                # Log probability for Gaussian (before rounding)
+                # Using continuous approximation for gradient flow
+                log_prob_gaussian = -0.5 * ((sampled - mean) / (std + 1e-8)) ** 2 - \
+                                    torch.log(std * (2 * torch.pi) ** 0.5 + 1e-8)
+                lp[integer_mask] = log_prob_gaussian
+            
+            # Continuous variables: Gaussian sampling
+            if continuous_mask.any():
+                mean = pred_values[continuous_mask]
+                if uncertainty is not None:
+                    std = torch.sqrt(uncertainty[continuous_mask])
+                else:
+                    std = torch.full_like(mean, self.sigma)
+                
+                noise = torch.randn_like(mean) * std
+                sampled = mean + noise
+                
+                # Clamp to bounds
+                if var_lb is not None and var_ub is not None:
+                    sampled = torch.clamp(sampled, var_lb[continuous_mask], var_ub[continuous_mask])
+                
+                sample[continuous_mask] = sampled
+                
+                # Log probability for Gaussian
+                log_prob_gaussian = -0.5 * ((sampled - mean) / (std + 1e-8)) ** 2 - \
+                                    torch.log(std * (2 * torch.pi) ** 0.5 + 1e-8)
+                lp[continuous_mask] = log_prob_gaussian
+            
+            samples[g] = sample
             log_probs[g] = lp
         
-        return samples, log_probs, probs
+        return samples, log_probs, pred_values
 
 
 class GRPOTrainer:

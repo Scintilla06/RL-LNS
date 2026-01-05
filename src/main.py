@@ -180,6 +180,17 @@ def train_sft(args):
     if val_dataset:
         print(f"Val samples: {len(val_dataset)}")
     
+    # Output directory based on mode
+    base_output_dir = sft_config['output_dir']
+    output_dir = os.path.join(base_output_dir, mode)
+    print(f"Output directory: {output_dir}")
+
+    # WandB configuration
+    wandb_config = training_config.get('wandb', {})
+    wandb_project = wandb_config.get('project', 'rl-lns-sft')
+    wandb_run_name = wandb_config.get('run_name', f"sft_{mode}")
+    wandb_mode = wandb_config.get('mode', None)
+
     # Initialize trainer
     trainer = SFTTrainer(
         model=model,
@@ -194,14 +205,14 @@ def train_sft(args):
         max_grad_norm=sft_config['max_grad_norm'],
         lambda_constraint=sft_config['lambda_constraint'],
         lambda_integrality=sft_config['lambda_integrality'],
-        output_dir=sft_config['output_dir'],
+        output_dir=output_dir,
         logging_steps=sft_config['logging_steps'],
         eval_steps=sft_config['eval_steps'],
         save_steps=sft_config['save_steps'],
         fp16=sft_config['fp16'],
-        wandb_project=training_config.get('wandb', {}).get('project'),
-        wandb_run_name=training_config.get('wandb', {}).get('run_name'),
-        wandb_mode=training_config.get('wandb', {}).get('mode', 'online'),
+        wandb_project=wandb_project,
+        wandb_run_name=wandb_run_name,
+        wandb_mode=wandb_mode,
         max_samples_per_epoch=sft_config.get('max_samples_per_epoch'),
         device=device,
     )

@@ -2,8 +2,10 @@
 Prediction heads for MILP solution prediction.
 
 Attached to LLM's last hidden state to predict:
-- Primal solution (0/1 for binary variables)
+- Primal solution (0/1 for binary, real values for integer/continuous)
 - Uncertainty (variance/confidence)
+
+Supports mixed variable types with hybrid activation mechanism.
 """
 
 import torch
@@ -12,11 +14,21 @@ import torch.nn.functional as F
 from typing import Optional, Tuple
 
 
+# Variable type constants
+VAR_BINARY = 0
+VAR_CONTINUOUS = 1
+VAR_INTEGER = 2
+
+
 class PredictionHead(nn.Module):
     """
-    Prediction head for binary variable solutions.
+    Prediction head for mixed-variable MILP solutions.
     
-    Takes variable hidden states and outputs probability of x_i = 1.
+    Uses hybrid activation mechanism:
+    - Binary variables: Sigmoid activation (probability of x_i = 1)
+    - Integer/Continuous variables: Softplus or Identity activation
+    
+    Output is raw logits; activation is applied based on variable types.
     """
     
     def __init__(
@@ -57,25 +69,86 @@ class PredictionHead(nn.Module):
         
         self.mlp = nn.Sequential(*layers)
     
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self, 
+        hidden_states: torch.Tensor,
+        var_types: Optional[torch.Tensor] = None,
+        var_lb: Optional[torch.Tensor] = None,
+        var_ub: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         """
-        Predict solution probabilities.
+        Predict solution values with hybrid activation.
         
         Args:
             hidden_states: Variable hidden states of shape (batch, n_vars, hidden_dim)
                           or (n_vars, hidden_dim).
+            var_types: Variable types (n_vars,) with values in {0, 1, 2}.
+                      0=binary, 1=continuous, 2=integer.
+                      If None, assumes all binary.
+            var_lb: Lower bounds for scaling continuous/integer outputs.
+            var_ub: Upper bounds for scaling continuous/integer outputs.
         
         Returns:
-            Predicted probabilities of shape (batch, n_vars) or (n_vars,).
+            Predicted values of shape (batch, n_vars) or (n_vars,).
+            For binary: probabilities in (0, 1)
+            For integer/continuous: scaled values respecting bounds
         """
         # MLP forward
         logits = self.mlp(hidden_states)  # (..., 1)
         logits = logits.squeeze(-1)  # (...,)
         
-        # Sigmoid for probability
-        # probs = torch.sigmoid(logits)
+        # If no var_types provided, return logits (backward compatible)
+        if var_types is None:
+            return logits
         
-        return logits
+        # Apply hybrid activation based on variable types
+        output = torch.zeros_like(logits)
+        
+        # Binary variables: Sigmoid
+        binary_mask = var_types == VAR_BINARY
+        if binary_mask.any():
+            output[binary_mask] = torch.sigmoid(logits[binary_mask])
+        
+        # Continuous variables: scaled to bounds using sigmoid
+        continuous_mask = var_types == VAR_CONTINUOUS
+        if continuous_mask.any():
+            # Use sigmoid to map to [lb, ub] range
+            sig_out = torch.sigmoid(logits[continuous_mask])
+            if var_lb is not None and var_ub is not None:
+                lb = var_lb[continuous_mask]
+                ub = var_ub[continuous_mask]
+                output[continuous_mask] = lb + sig_out * (ub - lb)
+            else:
+                # Default to [0, inf) using softplus
+                output[continuous_mask] = F.softplus(logits[continuous_mask])
+        
+        # Integer variables: similar to continuous but will be rounded later
+        integer_mask = var_types == VAR_INTEGER
+        if integer_mask.any():
+            # Use sigmoid to map to [lb, ub] range
+            sig_out = torch.sigmoid(logits[integer_mask])
+            if var_lb is not None and var_ub is not None:
+                lb = var_lb[integer_mask]
+                ub = var_ub[integer_mask]
+                output[integer_mask] = lb + sig_out * (ub - lb)
+            else:
+                # Default to non-negative using softplus
+                output[integer_mask] = F.softplus(logits[integer_mask])
+        
+        return output
+    
+    def forward_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """
+        Return raw logits without activation (for loss computation).
+        
+        Args:
+            hidden_states: Variable hidden states.
+        
+        Returns:
+            Raw logits of shape (batch, n_vars) or (n_vars,).
+        """
+        logits = self.mlp(hidden_states)
+        return logits.squeeze(-1)
 
 
 class UncertaintyHead(nn.Module):
@@ -256,7 +329,7 @@ class MultiTaskHead(nn.Module):
 
 class SolutionOutput:
     """
-    Container for model outputs.
+    Container for model outputs with support for mixed variable types.
     """
     
     def __init__(
@@ -265,49 +338,146 @@ class SolutionOutput:
         uncertainty: Optional[torch.Tensor] = None,
         dual: Optional[torch.Tensor] = None,
         hidden_states: Optional[torch.Tensor] = None,
+        var_types: Optional[torch.Tensor] = None,
+        var_lb: Optional[torch.Tensor] = None,
+        var_ub: Optional[torch.Tensor] = None,
     ):
         """
         Args:
-            primal: Predicted solution probabilities (n_vars,).
+            primal: Predicted solution values (n_vars,).
+                    For binary: probabilities in (0, 1)
+                    For integer/continuous: scaled values
             uncertainty: Prediction uncertainty (n_vars,).
             dual: Predicted reduced costs (n_vars,).
             hidden_states: Raw hidden states (n_vars, hidden_dim).
+            var_types: Variable types (n_vars,) with values {0: binary, 1: continuous, 2: integer}.
+            var_lb: Lower bounds (n_vars,).
+            var_ub: Upper bounds (n_vars,).
         """
         self.primal = primal
         self.uncertainty = uncertainty
         self.dual = dual
         self.hidden_states = hidden_states
+        self.var_types = var_types
+        self.var_lb = var_lb
+        self.var_ub = var_ub
     
     def to_discrete(self, threshold: float = 0.5) -> torch.Tensor:
         """
-        Convert probabilities to discrete solution.
+        Convert predictions to discrete solution respecting variable types.
         
         Args:
-            threshold: Probability threshold for x_i = 1.
+            threshold: Probability threshold for binary variables (x_i = 1 if p > threshold).
         
         Returns:
-            Discrete solution (n_vars,) with values in {0, 1}.
+            Discrete solution (n_vars,).
+            Binary: {0, 1}
+            Integer: rounded to nearest integer
+            Continuous: unchanged
         """
-        return (self.primal > threshold).float()
+        if self.var_types is None:
+            # Backward compatible: assume all binary
+            return (self.primal > threshold).float()
+        
+        solution = self.primal.clone()
+        
+        # Binary: threshold
+        binary_mask = self.var_types == VAR_BINARY
+        if binary_mask.any():
+            solution[binary_mask] = (self.primal[binary_mask] > threshold).float()
+        
+        # Integer: round to nearest integer, respecting bounds
+        integer_mask = self.var_types == VAR_INTEGER
+        if integer_mask.any():
+            rounded = torch.round(self.primal[integer_mask])
+            if self.var_lb is not None and self.var_ub is not None:
+                rounded = torch.clamp(rounded, 
+                                      self.var_lb[integer_mask], 
+                                      self.var_ub[integer_mask])
+            solution[integer_mask] = rounded
+        
+        # Continuous: keep as is, but clamp to bounds
+        continuous_mask = self.var_types == VAR_CONTINUOUS
+        if continuous_mask.any() and self.var_lb is not None and self.var_ub is not None:
+            solution[continuous_mask] = torch.clamp(
+                self.primal[continuous_mask],
+                self.var_lb[continuous_mask],
+                self.var_ub[continuous_mask]
+            )
+        
+        return solution
     
-    def sample(self, temperature: float = 1.0) -> torch.Tensor:
+    def sample(self, temperature: float = 1.0, sigma: float = 0.1) -> torch.Tensor:
         """
-        Sample discrete solution from probabilities.
+        Sample solution from predictions using type-appropriate distributions.
         
         Args:
-            temperature: Sampling temperature.
+            temperature: Sampling temperature for binary variables.
+            sigma: Standard deviation for Gaussian sampling of integer/continuous variables.
         
         Returns:
-            Sampled solution (n_vars,) with values in {0, 1}.
+            Sampled solution (n_vars,).
+            Binary: Bernoulli sample
+            Integer: Gaussian sample rounded to integer
+            Continuous: Gaussian sample
         """
-        if temperature != 1.0:
-            # Apply temperature to logits
-            logits = torch.logit(self.primal.clamp(1e-7, 1 - 1e-7))
-            probs = torch.sigmoid(logits / temperature)
-        else:
-            probs = self.primal
+        if self.var_types is None:
+            # Backward compatible: assume all binary
+            if temperature != 1.0:
+                logits = torch.logit(self.primal.clamp(1e-7, 1 - 1e-7))
+                probs = torch.sigmoid(logits / temperature)
+            else:
+                probs = self.primal
+            return torch.bernoulli(probs)
         
-        return torch.bernoulli(probs)
+        sample = torch.zeros_like(self.primal)
+        
+        # Binary: Bernoulli sampling
+        binary_mask = self.var_types == VAR_BINARY
+        if binary_mask.any():
+            probs = self.primal[binary_mask]
+            if temperature != 1.0:
+                logits = torch.logit(probs.clamp(1e-7, 1 - 1e-7))
+                probs = torch.sigmoid(logits / temperature)
+            sample[binary_mask] = torch.bernoulli(probs)
+        
+        # Integer: Gaussian sample + round
+        integer_mask = self.var_types == VAR_INTEGER
+        if integer_mask.any():
+            mean = self.primal[integer_mask]
+            # Use uncertainty as variance if available, otherwise use sigma
+            if self.uncertainty is not None:
+                std = torch.sqrt(self.uncertainty[integer_mask])
+            else:
+                std = torch.full_like(mean, sigma)
+            noise = torch.randn_like(mean) * std
+            sampled = mean + noise
+            # Round and clamp to bounds
+            rounded = torch.round(sampled)
+            if self.var_lb is not None and self.var_ub is not None:
+                rounded = torch.clamp(rounded, 
+                                      self.var_lb[integer_mask], 
+                                      self.var_ub[integer_mask])
+            sample[integer_mask] = rounded
+        
+        # Continuous: Gaussian sample
+        continuous_mask = self.var_types == VAR_CONTINUOUS
+        if continuous_mask.any():
+            mean = self.primal[continuous_mask]
+            if self.uncertainty is not None:
+                std = torch.sqrt(self.uncertainty[continuous_mask])
+            else:
+                std = torch.full_like(mean, sigma)
+            noise = torch.randn_like(mean) * std
+            sampled = mean + noise
+            # Clamp to bounds
+            if self.var_lb is not None and self.var_ub is not None:
+                sampled = torch.clamp(sampled,
+                                      self.var_lb[continuous_mask],
+                                      self.var_ub[continuous_mask])
+            sample[continuous_mask] = sampled
+        
+        return sample
     
     def most_uncertain(self, k: int) -> torch.Tensor:
         """
@@ -322,10 +492,73 @@ class SolutionOutput:
             Indices of k most uncertain variables.
         """
         if self.uncertainty is None:
-            # Use distance from 0.5 as uncertainty proxy
-            uncertainty = 0.5 - torch.abs(self.primal - 0.5)
+            # Use type-specific uncertainty proxies
+            if self.var_types is None:
+                # Binary: distance from 0.5
+                uncertainty = 0.5 - torch.abs(self.primal - 0.5)
+            else:
+                uncertainty = torch.zeros_like(self.primal)
+                
+                # Binary: confidence = |p - 0.5| * 2, uncertainty = 1 - confidence
+                binary_mask = self.var_types == VAR_BINARY
+                if binary_mask.any():
+                    conf = torch.abs(self.primal[binary_mask] - 0.5) * 2
+                    uncertainty[binary_mask] = 1 - conf
+                
+                # Integer: integrality gap |x - round(x)|
+                integer_mask = self.var_types == VAR_INTEGER
+                if integer_mask.any():
+                    int_gap = torch.abs(self.primal[integer_mask] - 
+                                       torch.round(self.primal[integer_mask]))
+                    uncertainty[integer_mask] = int_gap
+                
+                # Continuous: typically not selected for LNS, low uncertainty
+                continuous_mask = self.var_types == VAR_CONTINUOUS
+                if continuous_mask.any():
+                    uncertainty[continuous_mask] = 0.0
         else:
             uncertainty = self.uncertainty
         
-        _, indices = torch.topk(uncertainty, k)
+        _, indices = torch.topk(uncertainty, min(k, len(uncertainty)))
         return indices
+    
+    def get_type_specific_features(self) -> dict:
+        """
+        Get type-specific features for LNS score function.
+        
+        Returns:
+            Dict with features per variable type:
+            - binary: neural_conf (classification confidence)
+            - integer: neural_variance, integrality_gap
+            - continuous: neural_rc (reduced cost)
+        """
+        features = {
+            'neural_conf': None,  # For binary
+            'neural_variance': None,  # For integer
+            'integrality_gap': None,  # For integer
+            'neural_rc': self.dual,  # For continuous (and all)
+        }
+        
+        if self.var_types is None:
+            # All binary
+            features['neural_conf'] = torch.abs(self.primal - 0.5) * 2
+            return features
+        
+        n_vars = self.primal.size(0)
+        
+        # Binary confidence
+        features['neural_conf'] = torch.zeros(n_vars, device=self.primal.device)
+        binary_mask = self.var_types == VAR_BINARY
+        if binary_mask.any():
+            features['neural_conf'][binary_mask] = torch.abs(self.primal[binary_mask] - 0.5) * 2
+        
+        # Integer features
+        features['neural_variance'] = self.uncertainty if self.uncertainty is not None else torch.zeros(n_vars, device=self.primal.device)
+        features['integrality_gap'] = torch.zeros(n_vars, device=self.primal.device)
+        integer_mask = self.var_types == VAR_INTEGER
+        if integer_mask.any():
+            features['integrality_gap'][integer_mask] = torch.abs(
+                self.primal[integer_mask] - torch.round(self.primal[integer_mask])
+            )
+        
+        return features

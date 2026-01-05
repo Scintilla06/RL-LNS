@@ -268,8 +268,24 @@ class NeuroSolver(nn.Module):
         # Extract variable hidden states (first n_vars positions)
         var_hidden = hidden_states[:, :n_vars, :]  # (1, n_vars, hidden_size)
         
-        # Prediction heads
-        primal = self.pred_head(var_hidden).squeeze(0)  # (n_vars,)
+        # Extract variable type information
+        var_types = None
+        var_lb = None
+        var_ub = None
+        if hasattr(data, 'var_types') and data.var_types is not None:
+            var_types = data.var_types.to(self.device)
+        if hasattr(data, 'var_lb') and data.var_lb is not None:
+            var_lb = data.var_lb.to(self.device)
+        if hasattr(data, 'var_ub') and data.var_ub is not None:
+            var_ub = data.var_ub.to(self.device)
+        
+        # Prediction heads with type-aware activation
+        primal = self.pred_head(
+            var_hidden,
+            var_types=var_types,
+            var_lb=var_lb,
+            var_ub=var_ub,
+        ).squeeze(0)  # (n_vars,)
         
         uncertainty = None
         if self.include_uncertainty:
@@ -284,17 +300,26 @@ class NeuroSolver(nn.Module):
             uncertainty=uncertainty,
             dual=dual,
             hidden_states=var_hidden.squeeze(0),
+            var_types=var_types,
+            var_lb=var_lb,
+            var_ub=var_ub,
         )
     
     def forward_text(
         self, 
         text: str,
+        var_types: Optional[torch.Tensor] = None,
+        var_lb: Optional[torch.Tensor] = None,
+        var_ub: Optional[torch.Tensor] = None,
     ) -> SolutionOutput:
         """
         Forward pass for text mode.
         
         Args:
             text: MILP problem in text format.
+            var_types: Variable types (n_vars,). If None, assumes all binary.
+            var_lb: Lower bounds (n_vars,).
+            var_ub: Upper bounds (n_vars,).
         
         Returns:
             SolutionOutput with predictions.
@@ -307,8 +332,21 @@ class NeuroSolver(nn.Module):
         # Add batch dimension
         var_hidden = var_hidden.unsqueeze(0)  # (1, n_vars, hidden_size)
         
-        # Prediction heads
-        primal = self.pred_head(var_hidden).squeeze(0)
+        # Move var info to device if provided
+        if var_types is not None:
+            var_types = var_types.to(self.device)
+        if var_lb is not None:
+            var_lb = var_lb.to(self.device)
+        if var_ub is not None:
+            var_ub = var_ub.to(self.device)
+        
+        # Prediction heads with type-aware activation
+        primal = self.pred_head(
+            var_hidden,
+            var_types=var_types,
+            var_lb=var_lb,
+            var_ub=var_ub,
+        ).squeeze(0)
         
         uncertainty = None
         if self.include_uncertainty:
@@ -323,6 +361,9 @@ class NeuroSolver(nn.Module):
             uncertainty=uncertainty,
             dual=dual,
             hidden_states=var_hidden.squeeze(0),
+            var_types=var_types,
+            var_lb=var_lb,
+            var_ub=var_ub,
         )
     
     def forward(
@@ -330,17 +371,23 @@ class NeuroSolver(nn.Module):
         data: Optional["HeteroData"] = None,
         text: Optional[str] = None,
         mode: Optional[str] = None,
+        var_types: Optional[torch.Tensor] = None,
+        var_lb: Optional[torch.Tensor] = None,
+        var_ub: Optional[torch.Tensor] = None,
     ) -> SolutionOutput:
         """
-        Unified forward pass.
+        Unified forward pass with support for mixed variable types.
         
         Args:
             data: HeteroData graph (for GNN mode).
             text: Text input (for text mode).
             mode: Override default mode.
+            var_types: Variable types (for text mode, extracted from graph in GNN mode).
+            var_lb: Lower bounds (for text mode).
+            var_ub: Upper bounds (for text mode).
         
         Returns:
-            SolutionOutput with predictions.
+            SolutionOutput with predictions including type info.
         """
         mode = mode or self.mode
         
@@ -352,7 +399,7 @@ class NeuroSolver(nn.Module):
         elif mode == "text":
             if text is None:
                 raise ValueError("text required for text mode")
-            return self.forward_text(text)
+            return self.forward_text(text, var_types=var_types, var_lb=var_lb, var_ub=var_ub)
         
         else:
             raise ValueError(f"Unknown mode: {mode}")
@@ -363,21 +410,30 @@ class NeuroSolver(nn.Module):
         text: Optional[str] = None,
         threshold: float = 0.5,
         mode: Optional[str] = None,
+        var_types: Optional[torch.Tensor] = None,
+        var_lb: Optional[torch.Tensor] = None,
+        var_ub: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
-        Predict discrete solution.
+        Predict discrete solution respecting variable types.
         
         Args:
             data: HeteroData graph.
             text: Text input.
-            threshold: Probability threshold for discretization.
+            threshold: Probability threshold for binary discretization.
             mode: Input mode.
+            var_types: Variable types (for text mode).
+            var_lb: Lower bounds (for text mode).
+            var_ub: Upper bounds (for text mode).
         
         Returns:
             Tuple of (solution, uncertainty).
         """
         with torch.no_grad():
-            output = self.forward(data=data, text=text, mode=mode)
+            output = self.forward(
+                data=data, text=text, mode=mode,
+                var_types=var_types, var_lb=var_lb, var_ub=var_ub
+            )
         
         solution = output.to_discrete(threshold)
         return solution, output.uncertainty
@@ -388,27 +444,38 @@ class NeuroSolver(nn.Module):
         text: Optional[str] = None,
         n_samples: int = 16,
         temperature: float = 1.0,
+        sigma: float = 0.1,
         mode: Optional[str] = None,
+        var_types: Optional[torch.Tensor] = None,
+        var_lb: Optional[torch.Tensor] = None,
+        var_ub: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
-        Sample multiple solutions (for GRPO).
+        Sample multiple solutions (for GRPO) with type-aware sampling.
         
         Args:
             data: HeteroData graph.
             text: Text input.
             n_samples: Number of solutions to sample.
-            temperature: Sampling temperature.
+            temperature: Sampling temperature (for binary variables).
+            sigma: Standard deviation for Gaussian sampling (integer/continuous).
             mode: Input mode.
+            var_types: Variable types (for text mode).
+            var_lb: Lower bounds (for text mode).
+            var_ub: Upper bounds (for text mode).
         
         Returns:
             Sampled solutions of shape (n_samples, n_vars).
         """
         with torch.no_grad():
-            output = self.forward(data=data, text=text, mode=mode)
+            output = self.forward(
+                data=data, text=text, mode=mode,
+                var_types=var_types, var_lb=var_lb, var_ub=var_ub
+            )
         
         samples = []
         for _ in range(n_samples):
-            sample = output.sample(temperature=temperature)
+            sample = output.sample(temperature=temperature, sigma=sigma)
             samples.append(sample)
         
         return torch.stack(samples, dim=0)

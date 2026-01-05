@@ -560,9 +560,43 @@ class SFTTrainer:
         
         return avg_metrics
     
+    def _collate_fn(self, batch):
+        """Custom collate function to handle sparse tensors."""
+        from torch.utils.data.dataloader import default_collate
+        
+        if len(batch) == 0:
+            return batch
+            
+        elem = batch[0]
+        
+        # Handle dictionary (recurse)
+        if isinstance(elem, dict):
+            return {key: self._collate_fn([d[key] for d in batch]) for key in elem}
+            
+        # Handle sparse tensors
+        if isinstance(elem, torch.Tensor) and elem.is_sparse:
+            # If batch size is 1, return the tensor directly (no batch dimension added)
+            if len(batch) == 1:
+                return batch[0]
+            # If batch size > 1, return list (downstream needs to handle this)
+            return batch
+            
+        # Fallback to default_collate for everything else
+        return default_collate(batch)
+    
     def _create_dataloader(self, dataset: Any, shuffle: bool = True) -> DataLoader:
         """Create DataLoader for dataset."""
-        if HAS_PYG:
+        # Check if dataset returns Data/HeteroData objects (Graph mode)
+        is_graph_data = False
+        if HAS_PYG and hasattr(dataset, '__getitem__') and len(dataset) > 0:
+            try:
+                item = dataset[0]
+                if isinstance(item, HeteroData) or (hasattr(item, 'edge_index') and hasattr(item, 'x')):
+                    is_graph_data = True
+            except:
+                pass
+
+        if HAS_PYG and is_graph_data:
             from torch_geometric.loader import DataLoader as PyGDataLoader
             return PyGDataLoader(
                 dataset,
@@ -575,7 +609,7 @@ class SFTTrainer:
                 dataset,
                 batch_size=self.batch_size,
                 shuffle=shuffle,
-                collate_fn=lambda x: x,
+                collate_fn=self._collate_fn,
             )
     
     def save_checkpoint(self, name: str):

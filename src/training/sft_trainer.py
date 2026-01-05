@@ -698,11 +698,25 @@ class SFTTrainer:
             for batch in tqdm(val_loader, desc="Evaluating"):
                 prepared = self._prepare_batch(batch)
                 
+                mode = prepared.get('mode', 'gnn')
+                if isinstance(mode, list):
+                    mode = mode[0]
+                
+                text = prepared.get('text')
+                if isinstance(text, list):
+                    text = text[0]
+                
                 if self.fp16:
                     with torch.cuda.amp.autocast():
-                        output = self.model(data=prepared.get('data'), mode=prepared.get('mode', 'gnn'))
+                        if mode == 'text':
+                            output = self.model(text=text, mode='text')
+                        else:
+                            output = self.model(data=prepared.get('data'), mode=mode)
                 else:
-                    output = self.model(data=prepared.get('data'), mode=prepared.get('mode', 'gnn'))
+                    if mode == 'text':
+                        output = self.model(text=text, mode='text')
+                    else:
+                        output = self.model(data=prepared.get('data'), mode=mode)
                 
                 target = prepared.get('target')
                 

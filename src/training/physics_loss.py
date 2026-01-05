@@ -86,13 +86,20 @@ class TaskLoss(nn.Module):
             
             # Use BCE (not with_logits) since pred is already sigmoid
             binary_weight = weight[binary_mask] if weight is not None else None
+            
+            # Debug logging for dtypes
+            print(f"DEBUG: binary_pred dtype: {binary_pred.dtype}, binary_target dtype: {binary_target.dtype}")
+
             # Cast to float32 to avoid autocast error with BCE
-            binary_loss = F.binary_cross_entropy(
-                binary_pred.clamp(1e-7, 1 - 1e-7).float(), 
-                binary_target.float(), 
-                weight=binary_weight.float() if binary_weight is not None else None, 
-                reduction='mean'
-            )
+            # We must disable autocast because F.binary_cross_entropy raises an error 
+            # when called inside an autocast region, even if inputs are float32.
+            with torch.autocast(device_type=pred.device.type, enabled=False):
+                binary_loss = F.binary_cross_entropy(
+                    binary_pred.clamp(1e-7, 1 - 1e-7).float(), 
+                    binary_target.float(), 
+                    weight=binary_weight.float() if binary_weight is not None else None, 
+                    reduction='mean'
+                )
             total_loss = total_loss + binary_loss * binary_mask.sum()
             count += binary_mask.sum()
         

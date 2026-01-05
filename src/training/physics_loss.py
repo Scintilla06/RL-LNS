@@ -287,14 +287,21 @@ class ConstraintLoss(nn.Module):
                 ax_t = torch.sparse.mm(A_float, values_float.t())
                 ax = ax_t.t()
             
-            # Convert back to original dtype for consistency if needed
-            if original_dtype == torch.float16:
-                ax = ax.half()
+            # Note: We keep ax in float32 for loss calculation stability
+            # (No need to convert back to half)
         else:
             ax = torch.matmul(values, A.T)
         
+        # Ensure ax is float32 for loss calculation stability and to match b
+        if ax.dtype != torch.float32:
+            ax = ax.float()
+            
         # Expand b for batch: (1, n_constrs)
         b = b.unsqueeze(0)
+        
+        # Ensure b is float32
+        if b.dtype != torch.float32:
+            b = b.float()
         
         # Compute violations
         violations = torch.zeros_like(ax)

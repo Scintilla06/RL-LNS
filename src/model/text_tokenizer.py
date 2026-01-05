@@ -314,8 +314,8 @@ class ChunkedTextEncoder(nn.Module):
                     return_dict=True,
                 )
             
-            # Get last hidden state
-            hidden = outputs.last_hidden_state  # (1, chunk_len, hidden_dim)
+            # Get last layer hidden state from hidden_states tuple
+            hidden = outputs.hidden_states[-1]  # (1, chunk_len, hidden_dim)
             chunk_hiddens.append(hidden)
         
         # Get hidden dimension from first chunk
@@ -396,7 +396,8 @@ class TextTokenizerWrapper(nn.Module):
                     return_dict=True,
                 )
             
-            hidden = outputs.last_hidden_state
+            # Get last layer hidden state from hidden_states tuple
+            hidden = outputs.hidden_states[-1]
             
             # Get variable positions and aggregate
             var_positions = self.chunked_encoder.position_mapper.map_variables(

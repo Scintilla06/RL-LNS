@@ -753,8 +753,11 @@ class MILPPreprocessor:
         # Save processed data with compression
         print(f"Saving {len(graph_data)} processed samples...")
         
-        # Split train/val (10% validation)
-        val_size = int(len(graph_data) * 0.1)
+        # Split train/val
+        # Validation size is 10% of max_samples_per_epoch (5000), capped at available data
+        max_samples_per_epoch = 5000
+        val_size = min(int(max_samples_per_epoch * 0.1), len(graph_data) // 10)  # 500 or 10% of data
+        val_size = max(val_size, 1)  # At least 1 sample
         
         # Graph data only (text mode can reconstruct from graph data)
         train_graph = graph_data[val_size:]

@@ -101,6 +101,16 @@ class PredictionHead(nn.Module):
         if var_types is None:
             return logits
         
+        # Handle batch dimension mismatch
+        # logits may be (batch, n_vars) while var_types is (n_vars,)
+        if logits.dim() > var_types.dim():
+            # Expand var_types to match logits batch dimension
+            var_types = var_types.unsqueeze(0).expand(logits.shape[0], -1)
+            if var_lb is not None:
+                var_lb = var_lb.unsqueeze(0).expand(logits.shape[0], -1)
+            if var_ub is not None:
+                var_ub = var_ub.unsqueeze(0).expand(logits.shape[0], -1)
+        
         # Apply hybrid activation based on variable types
         output = torch.zeros_like(logits)
         

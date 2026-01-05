@@ -10,6 +10,7 @@ import torch
 import torch.nn as nn
 from typing import List, Dict, Tuple, Optional, Any
 import re
+import time
 
 
 class VariablePositionMapper:
@@ -56,27 +57,42 @@ class VariablePositionMapper:
             if offset_mapping is not None:
                 offset_mapping = offset_mapping[0]
         
+        t_start = time.time()
+        
         var_positions = {}
         
-        # Find all x[i] patterns
-        for match in re.finditer(r'x\[(\d+)\]', text):
+        # Pre-convert offset_mapping to list for faster access
+        offset_list = None
+        if offset_mapping is not None:
+            offset_list = offset_mapping.tolist()
+        
+        # Find all x[i] patterns using compiled regex
+        pattern = re.compile(r'x\[(\d+)\]')
+        matches = list(pattern.finditer(text))
+        
+        t_regex = time.time()
+        print(f"[DEBUG map_variables] Found {len(matches)} variable occurrences in {t_regex - t_start:.3f}s")
+        
+        for match in matches:
             var_idx = int(match.group(1))
             char_start = match.start()
             char_end = match.end()
             
-            if offset_mapping is not None:
-                # Use offset mapping for precise token positions
-                token_positions = self._char_to_token_positions(
-                    offset_mapping, char_start, char_end
+            if offset_list is not None:
+                # Use offset list for precise token positions (faster than tensor access)
+                token_positions = self._char_to_token_positions_fast(
+                    offset_list, char_start, char_end
                 )
             else:
                 # Fallback: estimate based on character position
-                # Rough heuristic: ~4 characters per token on average
                 token_positions = [char_start // 4]
             
             if var_idx not in var_positions:
                 var_positions[var_idx] = []
             var_positions[var_idx].extend(token_positions)
+        
+        t_end = time.time()
+        print(f"[DEBUG map_variables] Total time: {t_end - t_start:.3f}s, mapped {len(var_positions)} unique variables")
         
         return var_positions
     
@@ -86,13 +102,32 @@ class VariablePositionMapper:
         char_start: int,
         char_end: int,
     ) -> List[int]:
-        """Convert character span to token positions."""
+        """Convert character span to token positions (tensor version)."""
         positions = []
         for tok_idx, (tok_start, tok_end) in enumerate(offset_mapping.tolist()):
             if tok_start is None or tok_end is None:
                 continue
             # Check if token overlaps with character span
             if tok_end > char_start and tok_start < char_end:
+                positions.append(tok_idx)
+        return positions
+    
+    def _char_to_token_positions_fast(
+        self,
+        offset_list: List[Tuple[int, int]],
+        char_start: int,
+        char_end: int,
+    ) -> List[int]:
+        """Convert character span to token positions (list version, faster)."""
+        positions = []
+        for tok_idx, (tok_start, tok_end) in enumerate(offset_list):
+            if tok_start is None or tok_end is None:
+                continue
+            # Early exit if we've passed the character span
+            if tok_start >= char_end:
+                break
+            # Check if token overlaps with character span
+            if tok_end > char_start:
                 positions.append(tok_idx)
         return positions
 
@@ -315,7 +350,7 @@ class ChunkedTextEncoder(nn.Module):
         for start, end, chunk_ids in chunks:
             chunk_ids = chunk_ids.unsqueeze(0).to(device)
             
-            with torch.cuda.amp.autocast():
+            with torch.amp.autocast('cuda'):
                 outputs = model(
                     input_ids=chunk_ids,
                     output_hidden_states=True,
@@ -399,14 +434,21 @@ class TextTokenizerWrapper(nn.Module):
         
         if seq_len <= self.max_length:
             # Direct processing
-            input_ids = encoding['input_ids'].to(device)
+            print(f"[DEBUG TextTokenizerWrapper] Direct processing, seq_len={seq_len}")
             
-            with torch.cuda.amp.autocast():
+            t_start = time.time()
+            input_ids = encoding['input_ids'].to(device)
+            t_to_device = time.time()
+            print(f"[DEBUG TextTokenizerWrapper] Move to device: {t_to_device - t_start:.3f}s")
+            
+            with torch.amp.autocast('cuda'):
                 outputs = model(
                     input_ids=input_ids,
                     output_hidden_states=True,
                     return_dict=True,
                 )
+            t_model = time.time()
+            print(f"[DEBUG TextTokenizerWrapper] Model forward: {t_model - t_to_device:.3f}s")
             
             # Get last layer hidden state from hidden_states tuple
             hidden = outputs.hidden_states[-1]
@@ -415,6 +457,9 @@ class TextTokenizerWrapper(nn.Module):
             var_positions = self.chunked_encoder.position_mapper.map_variables(
                 text, encoding['input_ids'].squeeze(0), offset_mapping=offset_mapping
             )
+            t_map = time.time()
+            print(f"[DEBUG TextTokenizerWrapper] Variable mapping: {t_map - t_model:.3f}s")
+            
             n_vars = max(var_positions.keys()) + 1 if var_positions else 0
             
             # Simple aggregation for short sequences
@@ -423,6 +468,8 @@ class TextTokenizerWrapper(nn.Module):
                 if positions:
                     h = hidden[0, positions, :].mean(dim=0)
                     var_hiddens[var_idx] = h
+            t_agg = time.time()
+            print(f"[DEBUG TextTokenizerWrapper] Aggregation: {t_agg - t_map:.3f}s, total: {t_agg - t_start:.3f}s")
             
             return var_hiddens, n_vars
         

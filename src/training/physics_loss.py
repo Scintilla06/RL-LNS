@@ -64,11 +64,7 @@ class TaskLoss(nn.Module):
             Scalar loss value.
         """
         if var_types is None:
-            # Backward compatible: assume all binary
-            if self.label_smoothing > 0:
-                target = target * (1 - self.label_smoothing) + 0.5 * self.label_smoothing
-            loss = F.binary_cross_entropy_with_logits(pred, target, weight=weight, reduction='none')
-            return loss.mean()
+            raise ValueError("var_types is required for TaskLoss")
         
         # Align pred and target shapes
         # Handle case where one is (batch, n_vars) and other is (n_vars,)
@@ -165,8 +161,7 @@ class ConstraintLoss(nn.Module):
         - Integer/Continuous: pred gives direct value
         """
         if var_types is None:
-            # Backward compatible: assume all binary
-            return torch.sigmoid(pred)
+            raise ValueError("var_types is required for ConstraintLoss")
         
         values = pred.clone()
         
@@ -264,10 +259,7 @@ class ConstraintLoss(nn.Module):
             pred = pred.unsqueeze(0)
         
         # Get solution values (handles different variable types)
-        if var_types is not None:
-            values = self._get_solution_values(pred.squeeze(0), var_types).unsqueeze(0)
-        else:
-            values = torch.sigmoid(pred)
+        values = self._get_solution_values(pred.squeeze(0), var_types).unsqueeze(0)
         
         # Compute Ax: (batch, n_constrs)
         if A.is_sparse:
@@ -382,16 +374,7 @@ class IntegralityLoss(nn.Module):
             Integrality loss (only for binary and integer variables).
         """
         if var_types is None:
-            # Backward compatible: assume all binary
-            probs = torch.sigmoid(pred)
-            loss = 1 - torch.cos(2 * torch.pi * probs)
-            
-            if self.reduction == "mean":
-                return loss.mean()
-            elif self.reduction == "sum":
-                return loss.sum()
-            else:
-                return loss
+            raise ValueError("var_types is required for IntegralityLoss")
         
         # Create mask for variables that need integrality
         # Binary (0) and Integer (2), NOT Continuous (1)

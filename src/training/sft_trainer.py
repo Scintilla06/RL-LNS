@@ -346,16 +346,21 @@ class SFTTrainer:
         if isinstance(mode, list):
             mode = mode[0]
         
+        # Handle batched text (list of strings from collate) - take first sample
+        text = prepared.get('text')
+        if isinstance(text, list):
+            text = text[0]
+        
         # Forward pass based on mode
         if self.fp16:
             with torch.cuda.amp.autocast():
                 if mode == 'text':
-                    output = self.model(text=prepared.get('text'), mode='text')
+                    output = self.model(text=text, mode='text')
                 else:
                     output = self.model(data=prepared.get('data'), mode=mode)
         else:
             if mode == 'text':
-                output = self.model(text=prepared.get('text'), mode='text')
+                output = self.model(text=text, mode='text')
             else:
                 output = self.model(data=prepared.get('data'), mode=mode)
         

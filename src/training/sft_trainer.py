@@ -242,8 +242,33 @@ class SFTTrainer:
         
         Supports both:
         - Dense format (A, b, sense) from new preprocessed data
+        - COO components (A_row, A_col, A_val, A_shape) for text mode
         - Sparse format (from graph edges) for backward compatibility
         """
+        # COO components format (from text mode dataset)
+        if 'A_row' in prepared and prepared['A_row'] is not None:
+            # Handle batched COO components - reconstruct sparse tensor for first sample
+            A_row = prepared['A_row']
+            A_col = prepared['A_col']
+            A_val = prepared['A_val']
+            A_shape = prepared['A_shape']
+            
+            # If batched (list or has batch dim), take first sample
+            if isinstance(A_row, list):
+                A_row, A_col, A_val, A_shape = A_row[0], A_col[0], A_val[0], A_shape[0]
+            elif A_row.dim() > 1:
+                A_row, A_col, A_val, A_shape = A_row[0], A_col[0], A_val[0], A_shape[0]
+            
+            indices = torch.stack([A_row.long(), A_col.long()])
+            A = torch.sparse_coo_tensor(
+                indices, A_val, tuple(A_shape.tolist())
+            ).to(self.device)
+            return {
+                'A': A,
+                'b': prepared['b'][0] if isinstance(prepared['b'], list) or (isinstance(prepared['b'], torch.Tensor) and prepared['b'].dim() > 1) else prepared['b'],
+                'sense': prepared['sense'][0] if isinstance(prepared['sense'], list) or (isinstance(prepared['sense'], torch.Tensor) and prepared['sense'].dim() > 1) else prepared['sense'],
+            }
+        
         # Prefer dense format if available
         if 'A' in prepared and prepared['A'] is not None:
             return {

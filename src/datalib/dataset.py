@@ -125,21 +125,21 @@ class MILPTextDataset(Dataset):
         # Get text from text data
         text = text_sample['text'] if isinstance(text_sample, dict) else text_sample.text
         
-        # Reconstruct sparse A from graph data's COO format
+        # Extract sparse A components from graph data's COO format
+        # Store as separate tensors to allow proper batching (sparse tensors can't be batched)
         if hasattr(graph_sample, 'A_row'):
             # New format: COO components
-            indices = torch.stack([
-                graph_sample.A_row.long(), 
-                graph_sample.A_col.long()
-            ])
-            A_tensor = torch.sparse_coo_tensor(
-                indices, 
-                graph_sample.A_val,
-                graph_sample.A_shape
-            )
+            A_row = graph_sample.A_row.long()
+            A_col = graph_sample.A_col.long()
+            A_val = graph_sample.A_val
+            A_shape = graph_sample.A_shape
         elif hasattr(graph_sample, 'A'):
-            # Legacy format: sparse tensor directly
-            A_tensor = graph_sample.A
+            # Legacy format: sparse tensor directly - extract COO components
+            A_sparse = graph_sample.A.coalesce()
+            A_row = A_sparse.indices()[0]
+            A_col = A_sparse.indices()[1]
+            A_val = A_sparse.values()
+            A_shape = torch.tensor(A_sparse.shape)
         else:
             raise ValueError("Graph data missing constraint matrix")
         
@@ -148,7 +148,10 @@ class MILPTextDataset(Dataset):
             'n_vars': graph_sample.n_vars,
             'n_constrs': graph_sample.n_constrs,
             'target': graph_sample['var'].y if hasattr(graph_sample['var'], 'y') else torch.zeros(graph_sample.n_vars),
-            'A': A_tensor,
+            'A_row': A_row,
+            'A_col': A_col,
+            'A_val': A_val,
+            'A_shape': A_shape,
             'b': graph_sample.b,
             'sense': graph_sample.sense.long(),
             'var_types': graph_sample.var_types.long(),

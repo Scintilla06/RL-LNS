@@ -27,7 +27,7 @@ sft:
   
   # Physics-informed loss weights
   lambda_constraint: 0.1
-  lambda_integrality: 0.01
+  lambda_integrality: 0.1
   label_smoothing: 0.0
   
   # Logging

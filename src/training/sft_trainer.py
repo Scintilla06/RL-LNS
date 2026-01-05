@@ -122,6 +122,9 @@ class SFTTrainer:
         
         self.device = device or model.device
         
+        # Store base lambda for scheduling
+        self.base_lambda_integrality = lambda_integrality
+        
         # Initialize loss function
         self.loss_fn = PhysicsInformedLoss(
             lambda_constraint=lambda_constraint,
@@ -564,6 +567,10 @@ class SFTTrainer:
             epoch_losses = {'total': 0, 'task': 0, 'constraint': 0, 'integrality': 0}
             num_batches = 0
             
+            # Running losses for logging (reset every logging_steps)
+            logging_losses = {'total': 0, 'task': 0, 'constraint': 0, 'integrality': 0}
+            logging_batches = 0
+            
             # Use islice to limit iterator if needed
             if self.max_samples_per_epoch is not None:
                 epoch_iterator = itertools.islice(train_loader, batches_per_epoch)
@@ -573,13 +580,28 @@ class SFTTrainer:
             progress_bar = tqdm(epoch_iterator, total=batches_per_epoch, desc=f"Epoch {epoch + 1}")
             
             for step, batch in enumerate(progress_bar):
+                # Update integrality weight schedule
+                # Warmup for first 20% of steps
+                if num_training_steps > 0:
+                    progress = self.global_step / num_training_steps
+                    if progress < 0.2:
+                        self.loss_fn.lambda_integrality = 0.0
+                    else:
+                        # Linear ramp up from 0 to base_lambda
+                        # (progress - 0.2) goes from 0 to 0.8
+                        # factor goes from 0 to 1
+                        factor = min(1.0, (progress - 0.2) / 0.8)
+                        self.loss_fn.lambda_integrality = self.base_lambda_integrality * factor
+
                 # Training step
                 losses = self.train_step(batch)
                 
                 # Accumulate losses
                 for k, v in losses.items():
                     epoch_losses[k] += v
+                    logging_losses[k] += v
                 num_batches += 1
+                logging_batches += 1
                 
                 # Gradient accumulation
                 if (step + 1) % self.gradient_accumulation_steps == 0:
@@ -605,10 +627,14 @@ class SFTTrainer:
                     
                     # Logging
                     if self.global_step % self.logging_steps == 0:
-                        avg_losses = {k: v / num_batches for k, v in epoch_losses.items()}
+                        # Calculate average since last log
+                        avg_losses = {k: v / logging_batches for k, v in logging_losses.items()}
                         
                         progress_bar.set_postfix({
                             'loss': f"{avg_losses['total']:.4f}",
+                            'task': f"{avg_losses['task']:.4f}",
+                            'cons': f"{avg_losses['constraint']:.4f}",
+                            'int': f"{avg_losses['integrality']:.4f}",
                             'lr': f"{self.scheduler.get_last_lr()[0]:.2e}",
                         })
                         
@@ -619,8 +645,13 @@ class SFTTrainer:
                                 'train/constraint_loss': avg_losses['constraint'],
                                 'train/integrality_loss': avg_losses['integrality'],
                                 'train/learning_rate': self.scheduler.get_last_lr()[0],
+                                'train/lambda_integrality': self.loss_fn.lambda_integrality,
                                 'train/step': self.global_step,
                             })
+                        
+                        # Reset logging counters
+                        logging_losses = {'total': 0, 'task': 0, 'constraint': 0, 'integrality': 0}
+                        logging_batches = 0
                     
                     # Evaluation
                     if self.val_dataset is not None and self.global_step % self.eval_steps == 0:
@@ -706,7 +737,7 @@ class SFTTrainer:
             'accuracy': total_accuracy / num_samples,
         }
         
-        print(f"Validation - Loss: {avg_metrics['loss']:.4f}, Accuracy: {avg_metrics['accuracy']:.4f}")
+        print(f"Validation - Loss: {avg_metrics['loss']:.4f}, Task: {avg_metrics['task_loss']:.4f}, Cons: {avg_metrics['constraint_loss']:.4f}, Int: {avg_metrics['integrality_loss']:.4f}, Accuracy: {avg_metrics['accuracy']:.4f}")
         
         if self.use_wandb:
             wandb.log({

@@ -86,10 +86,11 @@ class TaskLoss(nn.Module):
             
             # Use BCE (not with_logits) since pred is already sigmoid
             binary_weight = weight[binary_mask] if weight is not None else None
+            # Cast to float32 to avoid autocast error with BCE
             binary_loss = F.binary_cross_entropy(
-                binary_pred.clamp(1e-7, 1 - 1e-7), 
-                binary_target, 
-                weight=binary_weight, 
+                binary_pred.clamp(1e-7, 1 - 1e-7).float(), 
+                binary_target.float(), 
+                weight=binary_weight.float() if binary_weight is not None else None, 
                 reduction='mean'
             )
             total_loss = total_loss + binary_loss * binary_mask.sum()

@@ -256,12 +256,24 @@ class SFTTrainer:
         if 'data' in prepared and prepared.get('mode') == 'gnn':
             data = prepared['data']
             
-            # Check if dense matrices are stored in graph
+            # New format: COO components stored separately
+            if hasattr(data, 'A_row'):
+                indices = torch.stack([data.A_row.long(), data.A_col.long()])
+                A = torch.sparse_coo_tensor(
+                    indices, data.A_val, data.A_shape
+                ).to(self.device)
+                return {
+                    'A': A,
+                    'b': data.b.to(self.device),
+                    'sense': data.sense.long().to(self.device),
+                }
+            
+            # Legacy format: sparse tensor directly
             if hasattr(data, 'A') and data.A is not None:
                 return {
-                    'A': data.A,
-                    'b': data.b,
-                    'sense': data.sense,
+                    'A': data.A.to(self.device),
+                    'b': data.b.to(self.device),
+                    'sense': data.sense.long().to(self.device),
                 }
             
             # Legacy: Build from edges

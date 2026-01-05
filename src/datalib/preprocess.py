@@ -462,8 +462,7 @@ class GraphBuilder:
         data['var'].x = torch.tensor(var_features, dtype=torch.float32)
         data['var'].n_nodes = instance.n_vars
         
-        # Add variable types as a node attribute (for GNN type embedding)
-        data['var'].var_types = torch.tensor(instance.var_types, dtype=torch.long)  # (n_vars,)
+        # Variable types stored at graph level only (not duplicated in var node)
         
         data['constr'].x = torch.tensor(constr_features, dtype=torch.float32)
         data['constr'].n_nodes = instance.n_constrs
@@ -486,32 +485,29 @@ class GraphBuilder:
         data.n_constrs = instance.n_constrs
         data.obj_sense = instance.obj_sense
         
-        # Store dense constraint matrix for loss computation
-        # Build sparse matrix A from sparse representation to save memory
-        indices = []
+        # Store constraint info in COO format (more efficient for serialization)
+        # Instead of storing full sparse tensor, store indices and values separately
+        row_indices = []
+        col_indices = []
         values = []
         for constr_idx, var_idx, coeff in instance.constr_matrix:
-            indices.append([constr_idx, var_idx])
+            row_indices.append(constr_idx)
+            col_indices.append(var_idx)
             values.append(coeff)
         
-        if indices:
-            i = torch.tensor(indices, dtype=torch.long).t()
-            v = torch.tensor(values, dtype=torch.float32)
-            data.A = torch.sparse_coo_tensor(i, v, (instance.n_constrs, instance.n_vars))
-        else:
-            data.A = torch.sparse_coo_tensor(
-                torch.zeros((2, 0), dtype=torch.long),
-                torch.zeros(0, dtype=torch.float32),
-                (instance.n_constrs, instance.n_vars)
-            )
+        # Store as compact tensors instead of sparse tensor (better pickle efficiency)
+        data.A_row = torch.tensor(row_indices, dtype=torch.int32)  # int32 saves space
+        data.A_col = torch.tensor(col_indices, dtype=torch.int32)
+        data.A_val = torch.tensor(values, dtype=torch.float32)
+        data.A_shape = (instance.n_constrs, instance.n_vars)
 
         data.b = torch.tensor(instance.constr_rhs, dtype=torch.float32)  # (n_constrs,)
-        data.sense = torch.tensor(instance.constr_sense, dtype=torch.long)  # (n_constrs,)
+        data.sense = torch.tensor(instance.constr_sense, dtype=torch.int8)  # int8 saves space (only 1,2,3)
         
-        # Store variable types and bounds for mixed-variable MILP support
-        data.var_types = torch.tensor(instance.var_types, dtype=torch.long)  # (n_vars,)
-        data.var_lb = torch.tensor(instance.var_lb, dtype=torch.float32)  # (n_vars,)
-        data.var_ub = torch.tensor(instance.var_ub, dtype=torch.float32)  # (n_vars,)
+        # Store variable types and bounds (use smaller dtypes)
+        data.var_types = torch.tensor(instance.var_types, dtype=torch.int8)  # int8 (only 0,1,2)
+        data.var_lb = torch.tensor(instance.var_lb, dtype=torch.float32)
+        data.var_ub = torch.tensor(instance.var_ub, dtype=torch.float32)
         
         return data
 
@@ -754,27 +750,31 @@ class MILPPreprocessor:
                 print(f"Error processing sample {idx}: {e}")
                 continue
         
-        # Save processed data
+        # Save processed data with compression
         print(f"Saving {len(graph_data)} processed samples...")
         
         # Split train/val (10% validation)
         val_size = int(len(graph_data) * 0.1)
         
-        # Graph data
+        # Graph data only (text mode can reconstruct from graph data)
         train_graph = graph_data[val_size:]
         val_graph = graph_data[:val_size]
-        torch.save(train_graph, output_path / "train.pt")
-        torch.save(val_graph, output_path / "val.pt")
         
-        # Text data (with constraints)
-        train_text = text_data[val_size:]
-        val_text = text_data[:val_size]
-        torch.save(train_text, output_path / "train_text.pt")
-        torch.save(val_text, output_path / "val_text.pt")
+        # Use pickle protocol 4 for better efficiency, no compression by default
+        # Users can compress externally if needed
+        torch.save(train_graph, output_path / "train.pt", pickle_protocol=4)
+        torch.save(val_graph, output_path / "val.pt", pickle_protocol=4)
+        
+        # Text data is redundant - constraints are already in graph data
+        # Only save text strings separately if needed for text mode
+        train_text_minimal = [{'text': t.text, 'instance_id': t.instance_id} for t in text_data[val_size:]]
+        val_text_minimal = [{'text': t.text, 'instance_id': t.instance_id} for t in text_data[:val_size]]
+        torch.save(train_text_minimal, output_path / "train_text.pt", pickle_protocol=4)
+        torch.save(val_text_minimal, output_path / "val_text.pt", pickle_protocol=4)
         
         print(f"Saved to {output_path}")
         print(f"  Graph - Train: {len(train_graph)}, Val: {len(val_graph)}")
-        print(f"  Text  - Train: {len(train_text)}, Val: {len(val_text)}")
+        print(f"  Text  - Train: {len(train_text_minimal)}, Val: {len(val_text_minimal)}")
     
     def process_single(self, lp_string: str, solution_string: Optional[str] = None) -> "HeteroData":
         """

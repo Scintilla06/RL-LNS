@@ -77,18 +77,14 @@ class MILPTextDataset(Dataset):
     """
     Dataset for MILP instances in text format with preprocessed constraint info.
     
-    Loads from preprocessed .pt files that contain:
-    - text: MILP problem text
-    - target: optimal solution
-    - A, b, sense: constraint matrix information
-    - var_types: variable types
-    
-    This ensures text mode can use the same PhysicsInformedLoss as GNN mode.
+    Now loads text from minimal text files and constraint info from graph files
+    to avoid data duplication.
     """
     
     def __init__(
         self,
         data_path: str,
+        graph_data_path: Optional[str] = None,
         tokenizer: Optional[Any] = None,
         max_length: int = 65536,
         chunk_size: int = 8192,
@@ -96,7 +92,9 @@ class MILPTextDataset(Dataset):
     ):
         """
         Args:
-            data_path: Path to preprocessed .pt file (train_text.pt or val_text.pt).
+            data_path: Path to preprocessed text .pt file (train_text.pt or val_text.pt).
+            graph_data_path: Path to corresponding graph .pt file for constraint info.
+                           If None, inferred from data_path (train_text.pt -> train.pt).
             tokenizer: HuggingFace tokenizer (optional, for on-the-fly tokenization).
             max_length: Maximum total sequence length.
             chunk_size: Size of each chunk for long sequences.
@@ -108,38 +106,58 @@ class MILPTextDataset(Dataset):
         self.chunk_size = chunk_size
         self.stride = stride
         
-        # Load preprocessed data
-        self.data_list = torch.load(self.data_path)
+        # Load text data (minimal: just text and instance_id)
+        self.text_data = torch.load(self.data_path)
+        
+        # Load graph data for constraint info
+        if graph_data_path is None:
+            # Infer graph path: train_text.pt -> train.pt
+            graph_data_path = str(self.data_path).replace('_text.pt', '.pt')
+        self.graph_data = torch.load(graph_data_path)
     
     def __len__(self) -> int:
-        return len(self.data_list)
+        return len(self.text_data)
     
     def __getitem__(self, idx: int) -> Dict[str, Any]:
-        sample = self.data_list[idx]
+        text_sample = self.text_data[idx]
+        graph_sample = self.graph_data[idx]
         
-        # Handle sparse A (scipy sparse matrix)
-        if hasattr(sample.A, 'tocoo'):
-            coo = sample.A.tocoo()
-            indices = torch.tensor([coo.row, coo.col], dtype=torch.long)
-            values = torch.tensor(coo.data, dtype=torch.float32)
-            A_tensor = torch.sparse_coo_tensor(indices, values, coo.shape)
+        # Get text from text data
+        text = text_sample['text'] if isinstance(text_sample, dict) else text_sample.text
+        
+        # Reconstruct sparse A from graph data's COO format
+        if hasattr(graph_sample, 'A_row'):
+            # New format: COO components
+            indices = torch.stack([
+                graph_sample.A_row.long(), 
+                graph_sample.A_col.long()
+            ])
+            A_tensor = torch.sparse_coo_tensor(
+                indices, 
+                graph_sample.A_val,
+                graph_sample.A_shape
+            )
+        elif hasattr(graph_sample, 'A'):
+            # Legacy format: sparse tensor directly
+            A_tensor = graph_sample.A
         else:
-            A_tensor = torch.tensor(sample.A, dtype=torch.float32)
+            raise ValueError("Graph data missing constraint matrix")
         
         result = {
-            'text': sample.text,
-            'n_vars': sample.n_vars,
-            'n_constrs': sample.n_constrs,
-            'target': torch.tensor(sample.target, dtype=torch.float32),
+            'text': text,
+            'n_vars': graph_sample.n_vars,
+            'n_constrs': graph_sample.n_constrs,
+            'target': graph_sample['var'].y if hasattr(graph_sample['var'], 'y') else torch.zeros(graph_sample.n_vars),
             'A': A_tensor,
-            'b': torch.tensor(sample.b, dtype=torch.float32),
-            'sense': torch.tensor(sample.sense, dtype=torch.long),
-            'var_types': torch.tensor(sample.var_types, dtype=torch.long),
+            'b': graph_sample.b,
+            'sense': graph_sample.sense.long(),
+            'var_types': graph_sample.var_types.long(),
             'mode': 'text',
         }
         
-        if sample.lp_relaxation is not None:
-            result['lp_relaxation'] = torch.tensor(sample.lp_relaxation, dtype=torch.float32)
+        # LP relaxation is in var features (4th column)
+        if hasattr(graph_sample['var'], 'x') and graph_sample['var'].x.shape[1] >= 4:
+            result['lp_relaxation'] = graph_sample['var'].x[:, 3]
         
         # Tokenize if tokenizer provided
         if self.tokenizer is not None:

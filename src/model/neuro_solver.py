@@ -22,7 +22,7 @@ except ImportError:
     HAS_PYG = False
 
 from .gnn_tokenizer import GNNTokenizer
-from .text_tokenizer import TextTokenizerWrapper, ChunkedTextEncoder
+from .text_tokenizer import TextTokenizerWrapper
 from .heads import PredictionHead, UncertaintyHead, MultiTaskHead, SolutionOutput
 
 

@@ -23,7 +23,7 @@ __author__ = "RL-LNS Team"
 # Core model
 from .model.neuro_solver import NeuroSolver
 from .model.gnn_tokenizer import GNNTokenizer, BipartiteGNN
-from .model.text_tokenizer import TextTokenizerWrapper, ChunkedTextEncoder
+from .model.text_tokenizer import TextTokenizerWrapper
 from .model.heads import PredictionHead, MultiTaskHead, SolutionOutput
 
 # Training
@@ -44,7 +44,6 @@ __all__ = [
     'GNNTokenizer',
     'BipartiteGNN',
     'TextTokenizerWrapper',
-    'ChunkedTextEncoder',
     'PredictionHead',
     'MultiTaskHead',
     'SolutionOutput',

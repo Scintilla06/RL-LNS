@@ -132,14 +132,18 @@ class MILPTextDataset(Dataset):
             A_row = graph_sample.A_row.long()
             A_col = graph_sample.A_col.long()
             A_val = graph_sample.A_val
-            A_shape = graph_sample.A_shape
+            # A_shape may be tuple or tensor
+            if isinstance(graph_sample.A_shape, tuple):
+                A_shape = torch.tensor(graph_sample.A_shape, dtype=torch.int64)
+            else:
+                A_shape = graph_sample.A_shape.long()
         elif hasattr(graph_sample, 'A'):
             # Legacy format: sparse tensor directly - extract COO components
             A_sparse = graph_sample.A.coalesce()
             A_row = A_sparse.indices()[0]
             A_col = A_sparse.indices()[1]
             A_val = A_sparse.values()
-            A_shape = torch.tensor(A_sparse.shape)
+            A_shape = torch.tensor(A_sparse.shape, dtype=torch.int64)
         else:
             raise ValueError("Graph data missing constraint matrix")
         

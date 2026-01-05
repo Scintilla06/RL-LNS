@@ -259,9 +259,17 @@ class SFTTrainer:
             elif A_row.dim() > 1:
                 A_row, A_col, A_val, A_shape = A_row[0], A_col[0], A_val[0], A_shape[0]
             
+            # Convert A_shape to tuple (handles tensor, list, or tuple)
+            if isinstance(A_shape, torch.Tensor):
+                shape_tuple = tuple(A_shape.tolist())
+            elif isinstance(A_shape, (list, tuple)):
+                shape_tuple = tuple(A_shape)
+            else:
+                shape_tuple = (int(A_shape[0]), int(A_shape[1]))
+            
             indices = torch.stack([A_row.long(), A_col.long()])
             A = torch.sparse_coo_tensor(
-                indices, A_val, tuple(A_shape.tolist())
+                indices, A_val, shape_tuple
             ).to(self.device)
             return {
                 'A': A,
@@ -284,8 +292,15 @@ class SFTTrainer:
             # New format: COO components stored separately
             if hasattr(data, 'A_row'):
                 indices = torch.stack([data.A_row.long(), data.A_col.long()])
+                # Convert A_shape to tuple (handles tensor, list, or tuple)
+                if isinstance(data.A_shape, torch.Tensor):
+                    shape_tuple = tuple(data.A_shape.tolist())
+                elif isinstance(data.A_shape, (list, tuple)):
+                    shape_tuple = tuple(data.A_shape)
+                else:
+                    shape_tuple = (int(data.A_shape[0]), int(data.A_shape[1]))
                 A = torch.sparse_coo_tensor(
-                    indices, data.A_val, data.A_shape
+                    indices, data.A_val, shape_tuple
                 ).to(self.device)
                 return {
                     'A': A,

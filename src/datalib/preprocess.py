@@ -499,7 +499,7 @@ class GraphBuilder:
         data.A_row = torch.tensor(row_indices, dtype=torch.int32)  # int32 saves space
         data.A_col = torch.tensor(col_indices, dtype=torch.int32)
         data.A_val = torch.tensor(values, dtype=torch.float32)
-        data.A_shape = (instance.n_constrs, instance.n_vars)
+        data.A_shape = torch.tensor([instance.n_constrs, instance.n_vars], dtype=torch.int64)
 
         data.b = torch.tensor(instance.constr_rhs, dtype=torch.float32)  # (n_constrs,)
         data.sense = torch.tensor(instance.constr_sense, dtype=torch.int8)  # int8 saves space (only 1,2,3)

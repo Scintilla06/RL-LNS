@@ -262,10 +262,26 @@ class ConstraintLoss(nn.Module):
             # NOTE: CUDA sparse mm does NOT support FP16 (Half).
             # When using mixed-precision training (autocast), we must
             # temporarily convert to float32 for the sparse operation.
+            #
+            # DEBUG: Print dtypes to diagnose the issue
+            print(f"[DEBUG ConstraintLoss.forward_batch] BEFORE conversion:")
+            print(f"  A.dtype = {A.dtype}, A.is_sparse = {A.is_sparse}, A.shape = {A.shape}")
+            print(f"  values.dtype = {values.dtype}, values.shape = {values.shape}")
+            print(f"  pred.dtype = {pred.dtype}, b.dtype = {b.dtype}, sense.dtype = {sense.dtype}")
+            if var_types is not None:
+                print(f"  var_types.dtype = {var_types.dtype}")
+            
             original_dtype = values.dtype
-            if values.dtype == torch.float16:
+            # Force both A and values to float32 for sparse mm
+            # A.dtype could also be float16 in some cases
+            if values.dtype != torch.float32:
                 values = values.float()
+            if A.dtype != torch.float32:
                 A = A.float()
+            
+            print(f"[DEBUG ConstraintLoss.forward_batch] AFTER conversion:")
+            print(f"  A.dtype = {A.dtype}, values.dtype = {values.dtype}")
+            
             ax_t = torch.sparse.mm(A, values.t())
             ax = ax_t.t()
             # Convert back to original dtype for consistency

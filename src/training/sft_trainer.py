@@ -245,6 +245,9 @@ class SFTTrainer:
         - COO components (A_row, A_col, A_val, A_shape) for text mode
         - Sparse format (from graph edges) for backward compatibility
         """
+        # DEBUG: Print what format we're receiving
+        print(f"[DEBUG _extract_constraints] Keys in prepared: {list(prepared.keys())}")
+        
         # COO components format (from text mode dataset)
         if 'A_row' in prepared and prepared['A_row'] is not None:
             # Handle batched COO components - reconstruct sparse tensor for first sample
@@ -277,19 +280,51 @@ class SFTTrainer:
             A = torch.sparse_coo_tensor(
                 indices, A_val, shape_tuple
             ).to(self.device)
-            return {
+            
+            # DEBUG: Print sparse tensor info
+            print(f"[DEBUG _extract_constraints] Built sparse A from COO components:")
+            print(f"  A.dtype = {A.dtype}, A.shape = {A.shape}, A.is_sparse = {A.is_sparse}")
+            print(f"  A_val.dtype = {A_val.dtype}")
+            
+            # Extract var_types if available
+            var_types = None
+            if 'var_types' in prepared and prepared['var_types'] is not None:
+                vt = prepared['var_types']
+                if isinstance(vt, list):
+                    var_types = vt[0].to(self.device)
+                elif isinstance(vt, torch.Tensor) and vt.dim() > 1:
+                    var_types = vt[0].to(self.device)
+                else:
+                    var_types = vt.to(self.device)
+                print(f"  var_types extracted: shape={var_types.shape}, dtype={var_types.dtype}")
+            else:
+                print(f"  var_types NOT found in prepared!")
+            
+            result = {
                 'A': A,
                 'b': prepared['b'][0] if isinstance(prepared['b'], list) or (isinstance(prepared['b'], torch.Tensor) and prepared['b'].dim() > 1) else prepared['b'],
                 'sense': prepared['sense'][0] if isinstance(prepared['sense'], list) or (isinstance(prepared['sense'], torch.Tensor) and prepared['sense'].dim() > 1) else prepared['sense'],
             }
+            if var_types is not None:
+                result['var_types'] = var_types
+            return result
         
         # Prefer dense format if available
         if 'A' in prepared and prepared['A'] is not None:
-            return {
+            print(f"[DEBUG _extract_constraints] Using dense A from prepared:")
+            print(f"  A type = {type(prepared['A'])}")
+            if hasattr(prepared['A'], 'dtype'):
+                print(f"  A.dtype = {prepared['A'].dtype}, A.is_sparse = {prepared['A'].is_sparse if hasattr(prepared['A'], 'is_sparse') else 'N/A'}")
+            
+            result = {
                 'A': prepared['A'],
                 'b': prepared['b'],
                 'sense': prepared['sense'],
             }
+            # Also check for var_types in prepared
+            if 'var_types' in prepared and prepared['var_types'] is not None:
+                result['var_types'] = prepared['var_types'].to(self.device) if isinstance(prepared['var_types'], torch.Tensor) else prepared['var_types']
+            return result
         
         # Fall back to extracting from graph structure
         if 'data' in prepared and prepared.get('mode') == 'gnn':
@@ -298,6 +333,7 @@ class SFTTrainer:
             # New format: COO components stored separately
             # Note: PyG DataLoader batches these, so we need to extract per-sample
             if hasattr(data, 'A_row'):
+                print(f"[DEBUG _extract_constraints] GNN mode: Found COO components")
                 # For batched data, A_row/A_col/A_val are concatenated
                 # A_shape becomes batched tensor [batch_size, 2]
                 # We only support batch_size=1 for constraint info
@@ -331,21 +367,36 @@ class SFTTrainer:
                 A = torch.sparse_coo_tensor(
                     indices, A_val, shape_tuple
                 ).to(self.device)
-                return {
+                
+                print(f"[DEBUG _extract_constraints] GNN COO -> sparse A:")
+                print(f"  A.dtype = {A.dtype}, A.shape = {A.shape}")
+                
+                result = {
                     'A': A,
                     'b': data.b.to(self.device),
                     'sense': data.sense.long().to(self.device),
                 }
+                # Extract var_types from graph data
+                if hasattr(data, 'var_types') and data.var_types is not None:
+                    result['var_types'] = data.var_types.long().to(self.device)
+                    print(f"  var_types from graph: shape={result['var_types'].shape}")
+                return result
             
             # Legacy format: sparse tensor directly
             if hasattr(data, 'A') and data.A is not None:
-                return {
+                print(f"[DEBUG _extract_constraints] GNN mode: Using legacy sparse A directly")
+                print(f"  A.dtype = {data.A.dtype}, A.shape = {data.A.shape}")
+                result = {
                     'A': data.A.to(self.device),
                     'b': data.b.to(self.device),
                     'sense': data.sense.long().to(self.device),
                 }
+                if hasattr(data, 'var_types') and data.var_types is not None:
+                    result['var_types'] = data.var_types.long().to(self.device)
+                return result
             
             # Legacy: Build from edges
+            print(f"[DEBUG _extract_constraints] GNN mode: Building from edges (legacy)")
             edge_index = data['var', 'participates', 'constr'].edge_index
             edge_attr = data['var', 'participates', 'constr'].edge_attr
             
@@ -361,17 +412,25 @@ class SFTTrainer:
             
             A = torch.sparse_coo_tensor(indices, values, (n_constrs, n_vars)).to(self.device)
             
+            print(f"[DEBUG _extract_constraints] Built sparse A from edges:")
+            print(f"  A.dtype = {A.dtype}, A.shape = {A.shape}")
+            
             constr_features = data['constr'].x
             b = constr_features[:, 0]
             sense = constr_features[:, 1:4].argmax(dim=1) + 1
             
-            return {
+            result = {
                 'A': A,
                 'b': b,
                 'sense': sense,
             }
+            # Try to get var_types from graph data
+            if hasattr(data, 'var_types') and data.var_types is not None:
+                result['var_types'] = data.var_types.long().to(self.device)
+            return result
         
         # No constraint info available
+        print(f"[DEBUG _extract_constraints] No constraint info found!")
         return {}
     
     def train_step(self, batch: Any) -> Dict[str, float]:

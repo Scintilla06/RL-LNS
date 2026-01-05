@@ -256,18 +256,24 @@ class SFTTrainer:
             # If batched (list or has batch dim), take first sample
             if isinstance(A_row, list):
                 A_row, A_col, A_val, A_shape = A_row[0], A_col[0], A_val[0], A_shape[0]
-            elif A_row.dim() > 1:
+            elif isinstance(A_row, torch.Tensor) and A_row.dim() > 1:
                 A_row, A_col, A_val, A_shape = A_row[0], A_col[0], A_val[0], A_shape[0]
+            
+            # Ensure 1D tensors for indices
+            A_row = A_row.flatten().long()
+            A_col = A_col.flatten().long()
+            A_val = A_val.flatten()
             
             # Convert A_shape to tuple (handles tensor, list, or tuple)
             if isinstance(A_shape, torch.Tensor):
-                shape_tuple = tuple(A_shape.tolist())
+                shape_tuple = tuple(A_shape.flatten().tolist())
             elif isinstance(A_shape, (list, tuple)):
-                shape_tuple = tuple(A_shape)
+                shape_tuple = tuple(int(x) for x in A_shape)
             else:
                 shape_tuple = (int(A_shape[0]), int(A_shape[1]))
             
-            indices = torch.stack([A_row.long(), A_col.long()])
+            # Build sparse tensor: indices should be (2, nnz)
+            indices = torch.stack([A_row, A_col], dim=0)
             A = torch.sparse_coo_tensor(
                 indices, A_val, shape_tuple
             ).to(self.device)

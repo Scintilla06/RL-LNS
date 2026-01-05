@@ -70,6 +70,14 @@ class TaskLoss(nn.Module):
             loss = F.binary_cross_entropy_with_logits(pred, target, weight=weight, reduction='none')
             return loss.mean()
         
+        # Align pred and target shapes
+        # Handle case where one is (batch, n_vars) and other is (n_vars,)
+        if pred.shape != target.shape:
+            if pred.dim() == 1 and target.dim() == 2 and target.shape[0] == 1:
+                target = target.squeeze(0)
+            elif pred.dim() == 2 and pred.shape[0] == 1 and target.dim() == 1:
+                pred = pred.squeeze(0)
+        
         total_loss = torch.tensor(0.0, device=pred.device)
         count = 0
         

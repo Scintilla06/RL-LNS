@@ -269,9 +269,18 @@ class SFTTrainer:
             
             # Convert A_shape to tuple (handles tensor, list, or tuple)
             if isinstance(A_shape, torch.Tensor):
+                if A_shape.dim() > 1:
+                    A_shape = A_shape[0]
                 shape_tuple = tuple(A_shape.flatten().tolist())
             elif isinstance(A_shape, (list, tuple)):
-                shape_tuple = tuple(int(x) for x in A_shape)
+                # Handle nested list (e.g. [[h, w]])
+                if len(A_shape) > 0 and isinstance(A_shape[0], (list, tuple, torch.Tensor)):
+                    A_shape = A_shape[0]
+                
+                if isinstance(A_shape, torch.Tensor):
+                     shape_tuple = tuple(A_shape.flatten().tolist())
+                else:
+                     shape_tuple = tuple(int(x) for x in A_shape)
             else:
                 shape_tuple = (int(A_shape[0]), int(A_shape[1]))
             
@@ -656,10 +665,8 @@ class SFTTrainer:
                     continue
                 
                 # Extract constraints
-                if 'data' in prepared and prepared['mode'] == 'gnn':
-                    constr_info = self._extract_constraints(prepared['data'])
-                else:
-                    constr_info = {}
+                # Use the same method as in train_step
+                constr_info = self._extract_constraints(prepared)
                 
                 # Compute loss
                 losses = self.loss_fn(

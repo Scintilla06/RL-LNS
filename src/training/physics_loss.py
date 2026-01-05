@@ -258,33 +258,36 @@ class ConstraintLoss(nn.Module):
             # values is (batch, n_vars) dense
             # We want values @ A.T -> (batch, n_constrs)
             # Use (A @ values.T).T
-            # 
+            
             # NOTE: CUDA sparse mm does NOT support FP16 (Half).
             # When using mixed-precision training (autocast), we must
             # temporarily convert to float32 for the sparse operation.
-            #
+            
             # DEBUG: Print dtypes to diagnose the issue
-            print(f"[DEBUG ConstraintLoss.forward_batch] BEFORE conversion:")
-            print(f"  A.dtype = {A.dtype}, A.is_sparse = {A.is_sparse}, A.shape = {A.shape}")
-            print(f"  values.dtype = {values.dtype}, values.shape = {values.shape}")
-            print(f"  pred.dtype = {pred.dtype}, b.dtype = {b.dtype}, sense.dtype = {sense.dtype}")
-            if var_types is not None:
-                print(f"  var_types.dtype = {var_types.dtype}")
+            print(f"[DEBUG ConstraintLoss.forward_batch] Sparse MM Check:")
+            print(f"  A: dtype={A.dtype}, shape={A.shape}, is_sparse={A.is_sparse}")
+            print(f"  values: dtype={values.dtype}, shape={values.shape}")
             
             original_dtype = values.dtype
-            # Force both A and values to float32 for sparse mm
-            # A.dtype could also be float16 in some cases
-            if values.dtype != torch.float32:
-                values = values.float()
-            if A.dtype != torch.float32:
-                A = A.float()
             
-            print(f"[DEBUG ConstraintLoss.forward_batch] AFTER conversion:")
-            print(f"  A.dtype = {A.dtype}, values.dtype = {values.dtype}")
+            # Disable autocast to prevent implicit casting back to half
+            with torch.amp.autocast('cuda', enabled=False):
+                # Force both A and values to float32 for sparse mm
+                
+                # Ensure A is float32
+                A_float = A.float() if A.dtype != torch.float32 else A
+                
+                # Ensure values is float32
+                values_float = values.float() if values.dtype != torch.float32 else values
+                
+                print(f"[DEBUG ConstraintLoss.forward_batch] Executing sparse.mm with float32:")
+                print(f"  A_float: dtype={A_float.dtype}")
+                print(f"  values_float: dtype={values_float.dtype}")
+                
+                ax_t = torch.sparse.mm(A_float, values_float.t())
+                ax = ax_t.t()
             
-            ax_t = torch.sparse.mm(A, values.t())
-            ax = ax_t.t()
-            # Convert back to original dtype for consistency
+            # Convert back to original dtype for consistency if needed
             if original_dtype == torch.float16:
                 ax = ax.half()
         else:

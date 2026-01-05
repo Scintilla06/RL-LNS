@@ -135,7 +135,7 @@ class SFTTrainer:
         self.scheduler = None
         
         # Mixed precision
-        self.scaler = torch.cuda.amp.GradScaler() if fp16 else None
+        self.scaler = torch.amp.GradScaler('cuda') if fp16 else None
         
         # WandB
         self.use_wandb = HAS_WANDB and wandb_project is not None
@@ -456,7 +456,7 @@ class SFTTrainer:
         
         # Forward pass based on mode
         if self.fp16:
-            with torch.cuda.amp.autocast():
+            with torch.amp.autocast('cuda'):
                 if mode == 'text':
                     output = self.model(text=text, mode='text')
                 else:
@@ -477,7 +477,7 @@ class SFTTrainer:
         
         # Compute loss
         if self.fp16:
-            with torch.cuda.amp.autocast():
+            with torch.amp.autocast('cuda'):
                 losses = self.loss_fn(
                     pred=output.primal,
                     target=target,

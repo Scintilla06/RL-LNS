@@ -117,12 +117,21 @@ class MILPTextDataset(Dataset):
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         sample = self.data_list[idx]
         
+        # Handle sparse A (scipy sparse matrix)
+        if hasattr(sample.A, 'tocoo'):
+            coo = sample.A.tocoo()
+            indices = torch.tensor([coo.row, coo.col], dtype=torch.long)
+            values = torch.tensor(coo.data, dtype=torch.float32)
+            A_tensor = torch.sparse_coo_tensor(indices, values, coo.shape)
+        else:
+            A_tensor = torch.tensor(sample.A, dtype=torch.float32)
+        
         result = {
             'text': sample.text,
             'n_vars': sample.n_vars,
             'n_constrs': sample.n_constrs,
             'target': torch.tensor(sample.target, dtype=torch.float32),
-            'A': torch.tensor(sample.A, dtype=torch.float32),
+            'A': A_tensor,
             'b': torch.tensor(sample.b, dtype=torch.float32),
             'sense': torch.tensor(sample.sense, dtype=torch.long),
             'var_types': torch.tensor(sample.var_types, dtype=torch.long),

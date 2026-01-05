@@ -253,7 +253,15 @@ class ConstraintLoss(nn.Module):
             values = torch.sigmoid(pred)
         
         # Compute Ax: (batch, n_constrs)
-        ax = torch.matmul(values, A.T)
+        if A.is_sparse:
+            # A is (n_constrs, n_vars) sparse
+            # values is (batch, n_vars) dense
+            # We want values @ A.T -> (batch, n_constrs)
+            # Use (A @ values.T).T
+            ax_t = torch.sparse.mm(A, values.t())
+            ax = ax_t.t()
+        else:
+            ax = torch.matmul(values, A.T)
         
         # Expand b for batch: (1, n_constrs)
         b = b.unsqueeze(0)

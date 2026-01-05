@@ -268,23 +268,26 @@ class SFTTrainer:
             edge_index = data['var', 'participates', 'constr'].edge_index
             edge_attr = data['var', 'participates', 'constr'].edge_attr
             
-            constr_matrix = []
-            for i in range(edge_index.size(1)):
-                var_idx = edge_index[0, i].item()
-                constr_idx = edge_index[1, i].item()
-                coeff = edge_attr[i, 0].item()
-                constr_matrix.append((constr_idx, var_idx, coeff))
+            # Optimize: Build sparse A tensor directly from graph structure
+            # edge_index is [var_idx, constr_idx]
+            # We want A[constr_idx, var_idx] = coeff
+            
+            indices = torch.stack([edge_index[1], edge_index[0]])
+            values = edge_attr.squeeze(-1)
+            
+            n_vars = data['var'].x.size(0)
+            n_constrs = data['constr'].x.size(0)
+            
+            A = torch.sparse_coo_tensor(indices, values, (n_constrs, n_vars)).to(self.device)
             
             constr_features = data['constr'].x
-            constr_rhs = constr_features[:, 0]
-            constr_sense = constr_features[:, 1:4].argmax(dim=1) + 1
+            b = constr_features[:, 0]
+            sense = constr_features[:, 1:4].argmax(dim=1) + 1
             
             return {
-                'constr_matrix': constr_matrix,
-                'constr_rhs': constr_rhs,
-                'constr_sense': constr_sense,
-                'n_vars': data['var'].x.size(0),
-                'n_constrs': data['constr'].x.size(0),
+                'A': A,
+                'b': b,
+                'sense': sense,
             }
         
         # No constraint info available

@@ -8,9 +8,10 @@ import re
 import numpy as np
 import torch
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional, Any
+from typing import Dict, List, Tuple, Optional, Any, Union
 from dataclasses import dataclass
 from tqdm import tqdm
+import scipy.sparse as sp
 
 try:
     from torch_geometric.data import HeteroData, Data
@@ -486,12 +487,24 @@ class GraphBuilder:
         data.obj_sense = instance.obj_sense
         
         # Store dense constraint matrix for loss computation
-        # Build dense matrix A from sparse representation
-        A = np.zeros((instance.n_constrs, instance.n_vars))
+        # Build sparse matrix A from sparse representation to save memory
+        indices = []
+        values = []
         for constr_idx, var_idx, coeff in instance.constr_matrix:
-            A[constr_idx, var_idx] = coeff
+            indices.append([constr_idx, var_idx])
+            values.append(coeff)
         
-        data.A = torch.tensor(A, dtype=torch.float32)  # (n_constrs, n_vars)
+        if indices:
+            i = torch.tensor(indices, dtype=torch.long).t()
+            v = torch.tensor(values, dtype=torch.float32)
+            data.A = torch.sparse_coo_tensor(i, v, (instance.n_constrs, instance.n_vars))
+        else:
+            data.A = torch.sparse_coo_tensor(
+                torch.zeros((2, 0), dtype=torch.long),
+                torch.zeros(0, dtype=torch.float32),
+                (instance.n_constrs, instance.n_vars)
+            )
+
         data.b = torch.tensor(instance.constr_rhs, dtype=torch.float32)  # (n_constrs,)
         data.sense = torch.tensor(instance.constr_sense, dtype=torch.long)  # (n_constrs,)
         
@@ -622,7 +635,7 @@ class TextDataSample:
     n_vars: int                          # Number of variables
     n_constrs: int                       # Number of constraints
     target: np.ndarray                   # Optimal solution (n_vars,)
-    A: np.ndarray                        # Constraint matrix (n_constrs, n_vars)
+    A: Union[np.ndarray, sp.spmatrix]    # Constraint matrix (n_constrs, n_vars) - Sparse or Dense
     b: np.ndarray                        # RHS (n_constrs,)
     sense: np.ndarray                    # Constraint sense (n_constrs,)
     var_types: np.ndarray                # Variable types (n_vars,)
@@ -669,10 +682,23 @@ class MILPPreprocessor:
     
     def _build_text_data(self, instance: MILPInstance, raw_text: str, idx: int) -> TextDataSample:
         """Build text data sample with all constraint information."""
-        # Build dense constraint matrix
-        A = np.zeros((instance.n_constrs, instance.n_vars))
+        # Build sparse constraint matrix using scipy.sparse
+        row_indices = []
+        col_indices = []
+        values = []
+        
         for constr_idx, var_idx, coeff in instance.constr_matrix:
-            A[constr_idx, var_idx] = coeff
+            row_indices.append(constr_idx)
+            col_indices.append(var_idx)
+            values.append(coeff)
+            
+        if values:
+            A = sp.coo_matrix(
+                (values, (row_indices, col_indices)), 
+                shape=(instance.n_constrs, instance.n_vars)
+            )
+        else:
+            A = sp.coo_matrix((instance.n_constrs, instance.n_vars))
         
         return TextDataSample(
             text=raw_text,

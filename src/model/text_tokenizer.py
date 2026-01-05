@@ -4,21 +4,29 @@ Chunked Text Tokenizer for handling long MILP text sequences.
 Splits long sequences (>64K tokens) into overlapping chunks,
 processes each chunk independently, then aggregates hidden states
 for variable nodes.
+
+Uses special <VAR> anchor token for precise variable position mapping.
 """
 
 import torch
 import torch.nn as nn
 from typing import List, Dict, Tuple, Optional, Any
 import re
-import time
+
+
+# Special token for variable anchoring
+VAR_ANCHOR_TOKEN = "<VAR>"
 
 
 class VariablePositionMapper:
     """
     Maps variable indices to their token positions in text.
     
-    Tracks where each variable (x[i]) appears in the tokenized text,
-    enabling aggregation of hidden states for prediction.
+    Uses <VAR> anchor tokens for precise position mapping:
+    - Preprocess text to add <VAR> after each variable: x[i] -> x[i]<VAR>
+    - During mapping, find <VAR> token positions directly
+    
+    This avoids issues with BPE tokenization splitting variable names.
     """
     
     def __init__(self, tokenizer: Any):
@@ -27,6 +35,71 @@ class VariablePositionMapper:
             tokenizer: HuggingFace tokenizer.
         """
         self.tokenizer = tokenizer
+        self.var_token_id = None
+        
+        # Try to get <VAR> token ID (may not exist if not added yet)
+        self._init_var_token()
+    
+    def _init_var_token(self):
+        """Initialize <VAR> token ID if it exists in tokenizer."""
+        if VAR_ANCHOR_TOKEN in self.tokenizer.get_vocab():
+            self.var_token_id = self.tokenizer.convert_tokens_to_ids(VAR_ANCHOR_TOKEN)
+    
+    @staticmethod
+    def preprocess_text(text: str) -> str:
+        """
+        Add <VAR> anchor token after each variable occurrence.
+        
+        Transforms: x[123] -> x[123]<VAR>
+        
+        Args:
+            text: Original MILP text.
+        
+        Returns:
+            Text with <VAR> anchors added.
+        """
+        # Replace x[i] with x[i]<VAR>
+        return re.sub(r'(x\[\d+\])', r'\1' + VAR_ANCHOR_TOKEN, text)
+    
+    def map_variables_fast(
+        self,
+        input_ids: torch.Tensor,
+        text: str,
+    ) -> Dict[int, List[int]]:
+        """
+        Fast variable mapping using <VAR> anchor tokens.
+        
+        Args:
+            input_ids: Tokenized input ids.
+            text: Preprocessed text (with <VAR> anchors).
+        
+        Returns:
+            Dict mapping var_idx to list of token positions.
+        """
+        if self.var_token_id is None:
+            # Fallback to regex-based mapping
+            return self.map_variables(text, input_ids)
+        
+        var_positions = {}
+        
+        # Find all <VAR> token positions
+        var_token_positions = (input_ids == self.var_token_id).nonzero(as_tuple=True)[0].tolist()
+        
+        # Extract variable indices from text (order matches <VAR> positions)
+        pattern = re.compile(r'x\[(\d+)\]' + re.escape(VAR_ANCHOR_TOKEN))
+        matches = list(pattern.finditer(text))
+        
+        if len(matches) != len(var_token_positions):
+            # Mismatch - fall back to regex mapping
+            return self.map_variables(text, input_ids)
+        
+        for match, token_pos in zip(matches, var_token_positions):
+            var_idx = int(match.group(1))
+            if var_idx not in var_positions:
+                var_positions[var_idx] = []
+            var_positions[var_idx].append(token_pos)
+        
+        return var_positions
     
     def map_variables(
         self, 
@@ -57,8 +130,6 @@ class VariablePositionMapper:
             if offset_mapping is not None:
                 offset_mapping = offset_mapping[0]
         
-        t_start = time.time()
-        
         var_positions = {}
         
         # Pre-convert offset_mapping to list for faster access
@@ -69,9 +140,6 @@ class VariablePositionMapper:
         # Find all x[i] patterns using compiled regex
         pattern = re.compile(r'x\[(\d+)\]')
         matches = list(pattern.finditer(text))
-        
-        t_regex = time.time()
-        print(f"[DEBUG map_variables] Found {len(matches)} variable occurrences in {t_regex - t_start:.3f}s")
         
         current_token_idx = 0
         num_tokens = len(offset_list) if offset_list else 0
@@ -135,9 +203,6 @@ class VariablePositionMapper:
             if var_idx not in var_positions:
                 var_positions[var_idx] = []
             var_positions[var_idx].extend(token_positions)
-        
-        t_end = time.time()
-        print(f"[DEBUG map_variables] Total time: {t_end - t_start:.3f}s, mapped {len(var_positions)} unique variables")
         
         return var_positions
     
@@ -306,19 +371,27 @@ class ChunkedTextEncoder(nn.Module):
     def encode(
         self,
         text: str,
+        use_var_anchor: bool = True,
     ) -> Dict[str, Any]:
         """
         Tokenize and prepare text for chunked processing.
         
         Args:
             text: Input text string.
+            use_var_anchor: Whether to use <VAR> anchor tokens for precise mapping.
+                           Requires tokenizer to have <VAR> as a special token.
         
         Returns:
             Dict with 'chunks', 'var_positions', 'var_chunk_map', 'n_vars'.
         """
+        # Optionally preprocess text to add <VAR> anchor tokens
+        processed_text = text
+        if use_var_anchor:
+            processed_text = VariablePositionMapper.preprocess_text(text)
+        
         # Tokenize full text with offset_mapping
         encoding = self.tokenizer(
-            text,
+            processed_text,
             return_tensors='pt',
             return_offsets_mapping=True,
             truncation=False,
@@ -328,8 +401,18 @@ class ChunkedTextEncoder(nn.Module):
         if offset_mapping is not None:
             offset_mapping = offset_mapping[0]  # Remove batch dim
         
-        # Get variable positions (pass offset_mapping to avoid re-tokenization)
-        var_positions = self.position_mapper.map_variables(text, input_ids, offset_mapping=offset_mapping)
+        # Get variable positions
+        if use_var_anchor:
+            # Fast mapping using <VAR> anchor tokens
+            var_positions = self.position_mapper.map_variables_fast(
+                processed_text, input_ids, offset_mapping=offset_mapping
+            )
+        else:
+            # Fallback to offset-based mapping (pass offset_mapping to avoid re-tokenization)
+            var_positions = self.position_mapper.map_variables(
+                text, input_ids, offset_mapping=offset_mapping
+            )
+        
         n_vars = max(var_positions.keys()) + 1 if var_positions else 0
         
         # Create chunks
@@ -344,6 +427,7 @@ class ChunkedTextEncoder(nn.Module):
             'var_positions': var_positions,
             'var_chunk_map': var_chunk_map,
             'n_vars': n_vars,
+            'processed_text': processed_text,  # Include for reference
         }
     
     def forward(
@@ -399,11 +483,46 @@ class ChunkedTextEncoder(nn.Module):
         return var_hiddens
 
 
+# Special token format for variable prediction positions
+VAR_PRED_TOKEN_FORMAT = "[VAR_{}]"
+
+
+def count_variables_in_text(text: str) -> int:
+    """Count the number of unique variables in MILP text."""
+    pattern = re.compile(r'x\[(\d+)\]')
+    var_indices = set(int(m.group(1)) for m in pattern.finditer(text))
+    return max(var_indices) + 1 if var_indices else 0
+
+
+def append_var_tokens(text: str, n_vars: int) -> str:
+    """
+    Append variable prediction tokens at the end of text.
+    
+    This is CRITICAL for causal attention: by placing [VAR_i] tokens
+    at the END of the sequence, they can attend to ALL preceding tokens
+    (the entire MILP description), enabling fair comparison with GNN mode.
+    
+    Args:
+        text: Original MILP text.
+        n_vars: Number of variables.
+    
+    Returns:
+        Text with appended variable tokens.
+    """
+    var_tokens = " ".join(VAR_PRED_TOKEN_FORMAT.format(i) for i in range(n_vars))
+    return text + "\n" + var_tokens
+
+
 class TextTokenizerWrapper(nn.Module):
     """
     Wrapper that provides same interface as GNNTokenizer for text input.
     
-    Handles both short sequences (direct processing) and long sequences (chunked).
+    Key design: Appends [VAR_0], [VAR_1], ..., [VAR_n] tokens at the END
+    of the text sequence. Due to causal attention, these tokens can
+    attend to ALL preceding content (the full MILP description).
+    
+    This makes text mode FAIR with GNN mode, where variables are also
+    placed at the end of the sequence.
     """
     
     def __init__(
@@ -412,6 +531,7 @@ class TextTokenizerWrapper(nn.Module):
         max_length: int = 32768,
         chunk_size: int = 8192,
         stride: int = 4096,
+        max_vars: int = 1000,
     ):
         """
         Args:
@@ -419,16 +539,41 @@ class TextTokenizerWrapper(nn.Module):
             max_length: Maximum sequence length for direct processing.
             chunk_size: Chunk size for long sequences.
             stride: Stride for chunked processing.
+            max_vars: Maximum number of variables to support.
         """
         super().__init__()
         self.tokenizer = tokenizer
         self.max_length = max_length
+        self.max_vars = max_vars
+        
+        # Add special tokens for variable positions if not already added
+        self._ensure_var_tokens_added()
         
         self.chunked_encoder = ChunkedTextEncoder(
             tokenizer=tokenizer,
             chunk_size=chunk_size,
             stride=stride,
         )
+    
+    def _ensure_var_tokens_added(self):
+        """Add [VAR_i] special tokens to tokenizer if not present."""
+        existing_tokens = set(self.tokenizer.get_vocab().keys())
+        new_tokens = []
+        
+        for i in range(self.max_vars):
+            token = VAR_PRED_TOKEN_FORMAT.format(i)
+            if token not in existing_tokens:
+                new_tokens.append(token)
+        
+        if new_tokens:
+            self.tokenizer.add_special_tokens({'additional_special_tokens': new_tokens})
+    
+    def get_var_token_ids(self, n_vars: int) -> List[int]:
+        """Get token IDs for [VAR_0] to [VAR_{n_vars-1}]."""
+        return [
+            self.tokenizer.convert_tokens_to_ids(VAR_PRED_TOKEN_FORMAT.format(i))
+            for i in range(n_vars)
+        ]
     
     def forward(
         self,
@@ -439,34 +584,75 @@ class TextTokenizerWrapper(nn.Module):
         """
         Process text input through LLM.
         
+        Pipeline:
+        1. Count variables in text to determine n_vars
+        2. Append [VAR_0], ..., [VAR_{n-1}] tokens at end
+        3. Run through LLM
+        4. Extract hidden states at the [VAR_i] positions (last n_vars tokens)
+        
         Args:
-            text: Input text.
+            text: Input MILP text.
             model: LLM model.
             device: Device.
         
         Returns:
             Tuple of (var_hiddens, n_vars).
         """
-        # Tokenize once with offset_mapping to avoid re-tokenization later
+        # Count variables in text
+        n_vars = count_variables_in_text(text)
+        
+        if n_vars == 0:
+            # No variables found - return empty
+            hidden_dim = model.config.hidden_size
+            return torch.zeros(0, hidden_dim, device=device), 0
+        
+        if n_vars > self.max_vars:
+            raise ValueError(f"Number of variables ({n_vars}) exceeds max_vars ({self.max_vars})")
+        
+        # Append [VAR_i] tokens at the end
+        text_with_vars = append_var_tokens(text, n_vars)
+        
+        # Tokenize
         encoding = self.tokenizer(
-            text,
+            text_with_vars,
             return_tensors='pt',
-            return_offsets_mapping=True,
             truncation=False,
         )
-        seq_len = encoding['input_ids'].size(1)
-        offset_mapping = encoding.get('offset_mapping')
-        if offset_mapping is not None:
-            offset_mapping = offset_mapping[0]  # Remove batch dim
+        input_ids = encoding['input_ids'].to(device)
+        seq_len = input_ids.size(1)
         
         if seq_len <= self.max_length:
             # Direct processing
-            print(f"[DEBUG TextTokenizerWrapper] Direct processing, seq_len={seq_len}")
+            with torch.amp.autocast('cuda'):
+                outputs = model(
+                    input_ids=input_ids,
+                    output_hidden_states=True,
+                    return_dict=True,
+                )
             
-            t_start = time.time()
-            input_ids = encoding['input_ids'].to(device)
-            t_to_device = time.time()
-            print(f"[DEBUG TextTokenizerWrapper] Move to device: {t_to_device - t_start:.3f}s")
+            # Get last layer hidden state
+            hidden = outputs.hidden_states[-1]  # (1, seq_len, hidden_dim)
+            
+            # Extract hidden states for the LAST n_vars tokens (the [VAR_i] tokens)
+            # These tokens can attend to ALL preceding content due to causal attention
+            var_hiddens = hidden[0, -n_vars:, :]  # (n_vars, hidden_dim)
+            
+            return var_hiddens, n_vars
+        
+        else:
+            # For long sequences, use chunked processing
+            # The [VAR_i] tokens are in the last chunk
+            # We need to ensure the last chunk processes them with full context
+            
+            # For now, fall back to direct processing with truncation warning
+            # TODO: Implement proper chunked processing for very long sequences
+            import warnings
+            warnings.warn(
+                f"Sequence length ({seq_len}) exceeds max_length ({self.max_length}). "
+                "Truncating to max_length. Consider using chunked processing."
+            )
+            
+            input_ids = input_ids[:, :self.max_length]
             
             with torch.amp.autocast('cuda'):
                 outputs = model(
@@ -474,34 +660,21 @@ class TextTokenizerWrapper(nn.Module):
                     output_hidden_states=True,
                     return_dict=True,
                 )
-            t_model = time.time()
-            print(f"[DEBUG TextTokenizerWrapper] Model forward: {t_model - t_to_device:.3f}s")
             
-            # Get last layer hidden state from hidden_states tuple
             hidden = outputs.hidden_states[-1]
             
-            # Get variable positions and aggregate (pass offset_mapping to avoid re-tokenization)
-            var_positions = self.chunked_encoder.position_mapper.map_variables(
-                text, encoding['input_ids'].squeeze(0), offset_mapping=offset_mapping
-            )
-            t_map = time.time()
-            print(f"[DEBUG TextTokenizerWrapper] Variable mapping: {t_map - t_model:.3f}s")
+            # If truncated, we may have lost some [VAR_i] tokens
+            # Use whatever we have at the end
+            actual_n_vars = min(n_vars, self.max_length - (seq_len - n_vars))
+            if actual_n_vars < n_vars:
+                warnings.warn(f"Only {actual_n_vars}/{n_vars} variable tokens fit in truncated sequence")
             
-            n_vars = max(var_positions.keys()) + 1 if var_positions else 0
+            var_hiddens = hidden[0, -actual_n_vars:, :]
             
-            # Simple aggregation for short sequences
-            var_hiddens = torch.zeros(n_vars, hidden.size(-1), device=device)
-            for var_idx, positions in var_positions.items():
-                if positions:
-                    h = hidden[0, positions, :].mean(dim=0)
-                    var_hiddens[var_idx] = h
-            t_agg = time.time()
-            print(f"[DEBUG TextTokenizerWrapper] Aggregation: {t_agg - t_map:.3f}s, total: {t_agg - t_start:.3f}s")
+            # Pad if needed
+            if actual_n_vars < n_vars:
+                hidden_dim = hidden.size(-1)
+                padding = torch.zeros(n_vars - actual_n_vars, hidden_dim, device=device)
+                var_hiddens = torch.cat([padding, var_hiddens], dim=0)
             
-            return var_hiddens, n_vars
-        
-        else:
-            # Chunked processing
-            var_hiddens = self.chunked_encoder(text, model, device)
-            n_vars = var_hiddens.size(0)
             return var_hiddens, n_vars

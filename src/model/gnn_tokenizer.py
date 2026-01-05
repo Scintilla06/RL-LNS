@@ -560,8 +560,10 @@ class BipartiteGNN(nn.Module):
                 edge_attr
             )
         
-        # Concatenate in fixed order: [variables, constraints]
-        x = torch.cat([x_var, x_constr], dim=0)  # (n_vars + n_constrs, hidden_dim)
+        # Concatenate in order: [constraints, variables]
+        # This order is CRITICAL for causal attention:
+        # Variables at the END can attend to ALL constraints before them
+        x = torch.cat([x_constr, x_var], dim=0)  # (n_constrs + n_vars, hidden_dim)
         x = self.output_norm(x)
         
         return x

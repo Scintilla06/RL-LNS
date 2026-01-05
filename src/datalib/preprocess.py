@@ -12,7 +12,10 @@ from typing import Dict, List, Tuple, Optional, Any, Union
 from dataclasses import dataclass
 from tqdm import tqdm
 import scipy.sparse as sp
-
+from ..utils.constants import (
+    VAR_BINARY, VAR_CONTINUOUS, VAR_INTEGER,
+    DEFAULT_LB, DEFAULT_UB, BINARY_LB, BINARY_UB
+)
 try:
     from torch_geometric.data import HeteroData, Data
     HAS_PYG = True
@@ -258,36 +261,39 @@ class LPFormatParser:
         for var_idx, coeff in obj_terms:
             obj_coeffs[var_idx] = coeff
         
-        # Default bounds: 0 <= x <= inf (standard LP assumption)
-        var_lb = np.zeros(n_vars)
-        var_ub = np.full(n_vars, float('inf'))
+        # Default bounds: use DEFAULT_LB and DEFAULT_UB for unbounded variables
+        var_lb = np.full(n_vars, DEFAULT_LB)
+        var_ub = np.full(n_vars, DEFAULT_UB)
         
-        # Apply parsed bounds
+        # Apply parsed bounds, replacing inf/-inf with defaults
         for var_idx, (lb, ub) in bounds.items():
             if var_idx < n_vars:
-                var_lb[var_idx] = lb
-                var_ub[var_idx] = ub
+                var_lb[var_idx] = lb if np.isfinite(lb) else DEFAULT_LB
+                var_ub[var_idx] = ub if np.isfinite(ub) else DEFAULT_UB
         
         # Determine variable types
-        # Default to Continuous (1)
-        var_types = np.ones(n_vars, dtype=np.int32)
+        # Default to Continuous (VAR_CONTINUOUS = 1)
+        var_types = np.full(n_vars, VAR_CONTINUOUS, dtype=np.int32)
         
-        # Apply Binaries (0)
+        # Apply Binaries (VAR_BINARY = 0) - always use [0, 1] bounds
         for var_str in binaries:
             var_idx = int(var_str)
             if var_idx < n_vars:
-                var_types[var_idx] = 0
-                # Binaries imply 0 <= x <= 1 unless specified otherwise
-                if var_idx not in bounds:
-                    var_lb[var_idx] = 0.0
-                    var_ub[var_idx] = 1.0
+                var_types[var_idx] = VAR_BINARY
+                # Binary variables ALWAYS have bounds [0, 1]
+                var_lb[var_idx] = BINARY_LB
+                var_ub[var_idx] = BINARY_UB
         
-        # Apply Generals/Integers (2)
+        # Apply Generals/Integers (VAR_INTEGER = 2)
         for var_str in generals:
             var_idx = int(var_str)
             if var_idx < n_vars:
-                var_types[var_idx] = 2
-                # Integers usually default to 0 <= x <= inf if not bounded
+                var_types[var_idx] = VAR_INTEGER
+                # Ensure bounds are finite
+                if not np.isfinite(var_lb[var_idx]):
+                    var_lb[var_idx] = DEFAULT_LB
+                if not np.isfinite(var_ub[var_idx]):
+                    var_ub[var_idx] = DEFAULT_UB
         
         return MILPInstance(
             n_vars=n_vars,

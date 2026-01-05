@@ -119,6 +119,8 @@ class NeuroSolver(nn.Module):
                 chunk_size=chunk_size,
                 stride=chunk_stride,
             )
+            # Resize model embeddings to accommodate new [VAR_i] tokens
+            self.qwen.resize_token_embeddings(len(self.tokenizer))
         
         # Prediction heads
         self.pred_head = PredictionHead(
@@ -216,14 +218,15 @@ class NeuroSolver(nn.Module):
         """
         Build attention mask based on graph structure.
         
-        Only allows attention between connected nodes.
-        Currently not implemented - returns None for full attention.
-        """
-        if not self.use_graph_attn_mask:
-            return None
+        Currently returns None to allow full attention between all tokens.
+        This is the recommended default as it allows the model to learn
+        which connections are important during training.
         
-        # TODO: Implement graph-aware attention mask
-        # For now, use full attention
+        Returns:
+            None (full attention allowed).
+        """
+        # Full attention: return None (no masking)
+        # The model can learn to attend to relevant positions
         return None
     
     def forward_gnn(
@@ -242,15 +245,18 @@ class NeuroSolver(nn.Module):
         # Move data to device
         data = data.to(self.device)
         n_vars = data['var'].x.size(0)
+        n_constrs = data['constr'].x.size(0)
         
         # GNN encoding → inputs_embeds
+        # Sequence order: [constraints, variables]
+        # This allows variables to attend to ALL constraints via causal mask
         inputs_embeds = self.gnn_tokenizer(data)  # (1, seq_len, hidden_size)
         seq_len = inputs_embeds.size(1)
         
         # Get position IDs (zeros if RoPE disabled)
         position_ids = self._get_position_ids(seq_len, self.device)
         
-        # Build attention mask
+        # Build attention mask (None = full causal attention)
         attention_mask = self._build_graph_attention_mask(data, seq_len)
         
         # Forward through Qwen
@@ -265,8 +271,9 @@ class NeuroSolver(nn.Module):
         # Get last hidden state
         hidden_states = outputs.hidden_states[-1]  # (1, seq_len, hidden_size)
         
-        # Extract variable hidden states (first n_vars positions)
-        var_hidden = hidden_states[:, :n_vars, :]  # (1, n_vars, hidden_size)
+        # Extract variable hidden states (LAST n_vars positions, after constraints)
+        # Sequence: [constr_0, ..., constr_m, var_0, ..., var_n]
+        var_hidden = hidden_states[:, n_constrs:, :]  # (1, n_vars, hidden_size)
         
         # Extract variable type information
         var_types = None

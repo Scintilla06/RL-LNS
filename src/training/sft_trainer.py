@@ -342,6 +342,9 @@ class SFTTrainer:
         """
         prepared = self._prepare_batch(batch)
         mode = prepared.get('mode', 'gnn')
+        # Handle batched mode (list of strings from collate)
+        if isinstance(mode, list):
+            mode = mode[0]
         
         # Forward pass based on mode
         if self.fp16:

@@ -258,8 +258,19 @@ class ConstraintLoss(nn.Module):
             # values is (batch, n_vars) dense
             # We want values @ A.T -> (batch, n_constrs)
             # Use (A @ values.T).T
+            # 
+            # NOTE: CUDA sparse mm does NOT support FP16 (Half).
+            # When using mixed-precision training (autocast), we must
+            # temporarily convert to float32 for the sparse operation.
+            original_dtype = values.dtype
+            if values.dtype == torch.float16:
+                values = values.float()
+                A = A.float()
             ax_t = torch.sparse.mm(A, values.t())
             ax = ax_t.t()
+            # Convert back to original dtype for consistency
+            if original_dtype == torch.float16:
+                ax = ax.half()
         else:
             ax = torch.matmul(values, A.T)
         

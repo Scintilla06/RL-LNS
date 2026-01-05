@@ -73,16 +73,61 @@ class VariablePositionMapper:
         t_regex = time.time()
         print(f"[DEBUG map_variables] Found {len(matches)} variable occurrences in {t_regex - t_start:.3f}s")
         
+        current_token_idx = 0
+        num_tokens = len(offset_list) if offset_list else 0
+        
         for match in matches:
             var_idx = int(match.group(1))
             char_start = match.start()
             char_end = match.end()
             
             if offset_list is not None:
-                # Use offset list for precise token positions (faster than tensor access)
-                token_positions = self._char_to_token_positions_fast(
-                    offset_list, char_start, char_end
-                )
+                token_positions = []
+                
+                # 1. Fast forward to the first token that might overlap
+                # We maintain current_token_idx across matches since matches are sequential
+                while current_token_idx < num_tokens:
+                    # Handle potential None or invalid offsets
+                    offsets = offset_list[current_token_idx]
+                    if not offsets or len(offsets) < 2:
+                        current_token_idx += 1
+                        continue
+                        
+                    tok_start, tok_end = offsets
+                    if tok_start is None or tok_end is None:
+                        current_token_idx += 1
+                        continue
+                        
+                    # If token ends before match starts, we can skip it
+                    if tok_end <= char_start:
+                        current_token_idx += 1
+                    else:
+                        # This token ends after match starts, so it might overlap
+                        break
+                
+                # 2. Collect all overlapping tokens starting from current_token_idx
+                # Use a temp index to scan forward without losing our place
+                temp_idx = current_token_idx
+                while temp_idx < num_tokens:
+                    offsets = offset_list[temp_idx]
+                    if not offsets or len(offsets) < 2:
+                        temp_idx += 1
+                        continue
+                        
+                    tok_start, tok_end = offsets
+                    if tok_start is None or tok_end is None:
+                        temp_idx += 1
+                        continue
+                    
+                    # If token starts after match ends, no more overlaps possible
+                    if tok_start >= char_end:
+                        break
+                    
+                    # If we are here, tok_end > char_start (from step 1) 
+                    # AND tok_start < char_end (from check above)
+                    # So it overlaps.
+                    token_positions.append(temp_idx)
+                    temp_idx += 1
             else:
                 # Fallback: estimate based on character position
                 token_positions = [char_start // 4]
@@ -111,25 +156,7 @@ class VariablePositionMapper:
             if tok_end > char_start and tok_start < char_end:
                 positions.append(tok_idx)
         return positions
-    
-    def _char_to_token_positions_fast(
-        self,
-        offset_list: List[Tuple[int, int]],
-        char_start: int,
-        char_end: int,
-    ) -> List[int]:
-        """Convert character span to token positions (list version, faster)."""
-        positions = []
-        for tok_idx, (tok_start, tok_end) in enumerate(offset_list):
-            if tok_start is None or tok_end is None:
-                continue
-            # Early exit if we've passed the character span
-            if tok_start >= char_end:
-                break
-            # Check if token overlaps with character span
-            if tok_end > char_start:
-                positions.append(tok_idx)
-        return positions
+
 
 
 class ChunkedTextEncoder(nn.Module):
